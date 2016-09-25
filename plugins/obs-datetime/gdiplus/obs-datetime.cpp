@@ -908,7 +908,7 @@ bool obs_module_load(void)
 
 	si.get_name = [] (void*)
 	{
-		return obs_module_text("TextGDIPlus");
+		return obs_module_text("DateAndTime");
 	};
 	si.create = [] (obs_data_t *settings, obs_source_t *source)
 	{
