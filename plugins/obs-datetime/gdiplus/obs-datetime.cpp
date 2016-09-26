@@ -3,6 +3,8 @@
 #include <util/util.hpp>
 #include <obs-module.h>
 #include <sys/stat.h>
+#include <sys/timeb.h>
+#include <time.h>
 #include <windows.h>
 #include <gdiplus.h>
 #include <algorithm>
@@ -189,6 +191,7 @@ struct TextSource {
 	bool read_from_file = false;
 	string file;
 	time_t file_timestamp = 0;
+	int framecnt = 0;
 	float update_time_elapsed = 0.0f;
 
 	wstring text;
@@ -608,8 +611,31 @@ const char *TextSource::GetMainString(const char *str)
 
 void TextSource::LoadFileText()
 {
-	BPtr<char> file_text = os_quick_read_utf8_file(file.c_str());
-	text = to_wide(GetMainString(file_text));
+	struct _timeb timebuffer;
+	struct tm ts;
+	char timeline[256];
+	int timezone;
+
+	if (_ftime_s(&timebuffer))
+		return;
+	if (localtime_s(&ts, &timebuffer.time))
+		return;
+	if (timebuffer.time > file_timestamp) {
+		framecnt = 0;
+		file_timestamp = timebuffer.time;
+	}
+	timezone = -timebuffer.timezone;
+	if (timebuffer.dstflag)
+		timezone += 60;
+
+	sprintf(timeline, "%04d/%02d/%02d %02d:%02d:%02d:%02d %+03d:%02d\n",
+		ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday,
+		ts.tm_hour, ts.tm_min, ts.tm_sec,
+		framecnt++,
+//		(timebuffer.millitm * 15) / 1000,
+		timezone / 60, timezone % 60);
+
+	text = to_wide(timeline);
 
 	if (!text.empty() && text.back() != '\n')
 		text.push_back('\n');
@@ -735,23 +761,10 @@ inline void TextSource::Update(obs_data_t *s)
 	obs_data_release(font_obj);
 }
 
-inline void TextSource::Tick(float seconds)
+inline void TextSource::Tick(float)
 {
-	if (!read_from_file)
-		return;
-
-	update_time_elapsed += seconds;
-
-	if (update_time_elapsed >= 2.0f) {
-		time_t t = get_modified_timestamp(file.c_str());
-		update_time_elapsed = 0.0f;
-
-		if (file_timestamp != t) {
-			LoadFileText();
-			RenderText();
-			file_timestamp = t;
-		}
-	}
+	LoadFileText();
+	RenderText();
 }
 
 inline void TextSource::Render(gs_effect_t *effect)
@@ -901,7 +914,7 @@ static obs_properties_t *get_properties(void *data)
 bool obs_module_load(void)
 {
 	obs_source_info si = {};
-	si.id = "text_gdiplus";
+	si.id = "datetime";
 	si.type = OBS_SOURCE_TYPE_INPUT;
 	si.output_flags = OBS_SOURCE_VIDEO;
 	si.get_properties = get_properties;
