@@ -54,6 +54,7 @@ class QNetworkReply;
 #define SIMPLE_ENCODER_X264_LOWCPU             "x264_lowcpu"
 #define SIMPLE_ENCODER_QSV                     "qsv"
 #define SIMPLE_ENCODER_NVENC                   "nvenc"
+#define SIMPLE_ENCODER_AMD                     "amd"
 
 #define PREVIEW_EDGE_SIZE 10
 
@@ -297,6 +298,12 @@ private:
 
 	inline void OnActivate();
 	inline void OnDeactivate();
+
+	void AddDropSource(const char *file, bool image);
+	void dragEnterEvent(QDragEnterEvent *event) override;
+	void dragLeaveEvent(QDragLeaveEvent *event) override;
+	void dragMoveEvent(QDragMoveEvent *event) override;
+	void dropEvent(QDropEvent *event) override;
 
 public slots:
 	void StartStreaming();

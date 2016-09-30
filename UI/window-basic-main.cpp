@@ -120,6 +120,8 @@ OBSBasic::OBSBasic(QWidget *parent)
 	: OBSMainWindow  (parent),
 	  ui             (new Ui::OBSBasic)
 {
+	setAcceptDrops(true);
+
 	ui->setupUi(this);
 	ui->previewDisabledLabel->setVisible(false);
 
@@ -135,9 +137,7 @@ OBSBasic::OBSBasic(QWidget *parent)
 		restoreGeometry(byteArray);
 
 		QRect windowGeometry = normalGeometry();
-		int posx = windowGeometry.x();
-		int posy = windowGeometry.y();
-		if (!WindowPositionValid(posx, posy)) {
+		if (!WindowPositionValid(windowGeometry)) {
 			QRect rect = App()->desktop()->availableGeometry();
 			setGeometry(QStyle::alignedRect(
 						Qt::LeftToRight,
@@ -1166,6 +1166,7 @@ void OBSBasic::OBSInit()
 	connect(ui->preview, &OBSQTDisplay::DisplayCreated, addDisplay);
 
 #ifdef _WIN32
+	SetWin32DropStyle(this);
 	show();
 #endif
 
@@ -1465,11 +1466,6 @@ OBSBasic::~OBSBasic()
 	QRect lastGeom = normalGeometry();
 	QList<int> splitterSizes = ui->mainSplitter->sizes();
 	bool alwaysOnTop = IsAlwaysOnTop(this);
-
-	if (isVisible())
-		config_set_string(App()->GlobalConfig(),
-				"BasicWindow", "geometry",
-				saveGeometry().toBase64().constData());
 
 	config_set_int(App()->GlobalConfig(), "BasicWindow", "splitterTop",
 			splitterSizes[0]);
@@ -2636,6 +2632,11 @@ void OBSBasic::ClearSceneData()
 
 void OBSBasic::closeEvent(QCloseEvent *event)
 {
+	if (isVisible())
+		config_set_string(App()->GlobalConfig(),
+				"BasicWindow", "geometry",
+				saveGeometry().toBase64().constData());
+
 	if (outputHandler && outputHandler->Active()) {
 		SetShowing(true);
 
