@@ -719,20 +719,10 @@ inline void TextSource::Update(obs_data_t *s)
 	chatlog_mode = new_chat_mode;
 	chatlog_lines = new_chat_lines;
 
-	if (read_from_file) {
-		file = new_file;
-		file_timestamp = get_modified_timestamp(new_file);
-		LoadFileText();
+	//chatlog_mode = new_chat_mode;
+	//chatlog_lines = new_chat_lines;
 
-	} else {
-		text = to_wide(GetMainString(new_text));
-
-		/* all text should end with newlines due to the fact that GDI+
-		 * treats strings without newlines differently in terms of
-		 * render size */
-		if (!text.empty())
-			text.push_back('\n');
-	}
+	LoadFileText();
 
 	use_outline = new_outline;
 	outline_color = new_o_color;
