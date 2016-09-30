@@ -637,7 +637,7 @@ void TextSource::LoadFileText()
 
 inline void TextSource::Update(obs_data_t *s)
 {
-	const char *new_text   = obs_data_get_string(s, S_TEXT);
+//	const char *new_text   = obs_data_get_string(s, S_TEXT);
 	obs_data_t *font_obj   = obs_data_get_obj(s, S_FONT);
 	const char *align_str  = obs_data_get_string(s, S_ALIGN);
 	const char *valign_str = obs_data_get_string(s, S_VALIGN);
@@ -648,10 +648,10 @@ inline void TextSource::Update(obs_data_t *s)
 	uint32_t new_o_color   = obs_data_get_uint32(s, S_OUTLINE_COLOR);
 	uint32_t new_o_opacity = obs_data_get_uint32(s, S_OUTLINE_OPACITY);
 	uint32_t new_o_size    = obs_data_get_uint32(s, S_OUTLINE_SIZE);
-	bool new_use_file      = obs_data_get_bool(s, S_USE_FILE);
-	const char *new_file   = obs_data_get_string(s, S_FILE);
-	bool new_chat_mode     = obs_data_get_bool(s, S_CHATLOG_MODE);
-	int new_chat_lines     = (int)obs_data_get_int(s, S_CHATLOG_LINES);
+//	bool new_use_file      = obs_data_get_bool(s, S_USE_FILE);
+//	const char *new_file   = obs_data_get_string(s, S_FILE);
+//	bool new_chat_mode     = obs_data_get_bool(s, S_CHATLOG_MODE);
+//	int new_chat_lines     = (int)obs_data_get_int(s, S_CHATLOG_LINES);
 	bool new_extents       = obs_data_get_bool(s, S_EXTENTS);
 	bool new_extents_wrap  = obs_data_get_bool(s, S_EXTENTS_WRAP);
 	uint32_t n_extents_cx  = obs_data_get_uint32(s, S_EXTENTS_CX);
@@ -706,10 +706,7 @@ inline void TextSource::Update(obs_data_t *s)
 	extents_cx = n_extents_cx;
 	extents_cy = n_extents_cy;
 
-	read_from_file = new_use_file;
-
-	chatlog_mode = new_chat_mode;
-	chatlog_lines = new_chat_lines;
+	//read_from_file = new_use_file;
 
 	//chatlog_mode = new_chat_mode;
 	//chatlog_lines = new_chat_lines;
