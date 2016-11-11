@@ -19,11 +19,14 @@
 
 #include <time.h>
 #include <obs.hpp>
+#include <QGuiApplication>
 #include <QMessageBox>
 #include <QShowEvent>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QDesktopWidget>
+#include <QRect>
+#include <QScreen>
 
 #include <util/dstr.h>
 #include <util/util.hpp>
@@ -138,7 +141,7 @@ OBSBasic::OBSBasic(QWidget *parent)
 
 		QRect windowGeometry = normalGeometry();
 		if (!WindowPositionValid(windowGeometry)) {
-			QRect rect = App()->desktop()->availableGeometry();
+			QRect rect = App()->desktop()->geometry();
 			setGeometry(QStyle::alignedRect(
 						Qt::LeftToRight,
 						Qt::AlignCenter,
@@ -780,17 +783,18 @@ static const double scaled_vals[] =
 
 bool OBSBasic::InitBasicConfigDefaults()
 {
-	vector<MonitorInfo> monitors;
-	GetMonitors(monitors);
+	QList<QScreen*> screens = QGuiApplication::screens();
 
-	if (!monitors.size()) {
+	if (!screens.size()) {
 		OBSErrorBox(NULL, "There appears to be no monitors.  Er, this "
 		                  "technically shouldn't be possible.");
 		return false;
 	}
 
-	uint32_t cx = monitors[0].cx;
-	uint32_t cy = monitors[0].cy;
+	QScreen *primaryScreen = QGuiApplication::primaryScreen();
+
+	uint32_t cx = primaryScreen->size().width();
+	uint32_t cy = primaryScreen->size().height();
 
 	/* ----------------------------------------------------- */
 	/* move over mixer values in advanced if older config */
@@ -2768,19 +2772,16 @@ static void AddProjectorMenuMonitors(QMenu *parent, QObject *target,
 		const char *slot)
 {
 	QAction *action;
-	std::vector<MonitorInfo> monitors;
-	GetMonitors(monitors);
-
-	for (int i = 0; (size_t)i < monitors.size(); i++) {
-		const MonitorInfo &monitor = monitors[i];
-
+	QList<QScreen*> screens = QGuiApplication::screens();
+	for (int i = 0; i < screens.size(); i++) {
+		QRect screenGeometry = screens[i]->geometry();
 		QString str = QString("%1 %2: %3x%4 @ %5,%6").
 			arg(QTStr("Display"),
 			    QString::number(i),
-			    QString::number((int)monitor.cx),
-			    QString::number((int)monitor.cy),
-			    QString::number((int)monitor.x),
-			    QString::number((int)monitor.y));
+			    QString::number((int)screenGeometry.width()),
+			    QString::number((int)screenGeometry.height()),
+			    QString::number((int)screenGeometry.x()),
+			    QString::number((int)screenGeometry.y()));
 
 		action = parent->addAction(str, target, slot);
 		action->setProperty("monitor", i);
@@ -3184,9 +3185,11 @@ QMenu *OBSBasic::CreateAddSourcePopupMenu()
 {
 	const char *type;
 	bool foundValues = false;
+	bool foundDeprecated = false;
 	size_t idx = 0;
 
 	QMenu *popup = new QMenu(QTStr("Add"), this);
+	QMenu *deprecated = new QMenu(QTStr("Deprecated"), popup);
 
 	auto getActionAfter = [] (QMenu *menu, const QString &name)
 	{
@@ -3219,15 +3222,26 @@ QMenu *OBSBasic::CreateAddSourcePopupMenu()
 
 		if ((caps & OBS_SOURCE_DEPRECATED) == 0) {
 			addSource(popup, type, name);
-			foundValues = true;
+		} else {
+			addSource(deprecated, type, name);
+			foundDeprecated = true;
 		}
+		foundValues = true;
 	}
 
 	addSource(popup, "scene", Str("Basic.Scene"));
 
+	if (!foundDeprecated) {
+		delete deprecated;
+		deprecated = nullptr;
+	}
+
 	if (!foundValues) {
 		delete popup;
 		popup = nullptr;
+
+	} else if (foundDeprecated) {
+		popup->addMenu(deprecated);
 	}
 
 	return popup;
@@ -3601,14 +3615,20 @@ void OBSBasic::StartStreaming()
 
 	ui->streamButton->setEnabled(false);
 	ui->streamButton->setText(QTStr("Basic.Main.Connecting"));
-	sysTrayStream->setEnabled(false);
-	sysTrayStream->setText(ui->streamButton->text());
+
+	if (sysTrayStream) {
+		sysTrayStream->setEnabled(false);
+		sysTrayStream->setText(ui->streamButton->text());
+	}
 
 	if (!outputHandler->StartStreaming(service)) {
 		ui->streamButton->setText(QTStr("Basic.Main.StartStreaming"));
 		ui->streamButton->setEnabled(true);
-		sysTrayStream->setText(ui->streamButton->text());
-		sysTrayStream->setEnabled(true);
+
+		if (sysTrayStream) {
+			sysTrayStream->setText(ui->streamButton->text());
+			sysTrayStream->setEnabled(true);
+		}
 	}
 
 	bool recordWhenStreaming = config_get_bool(GetGlobalConfig(),
@@ -3645,7 +3665,8 @@ inline void OBSBasic::OnActivate()
 		App()->IncrementSleepInhibition();
 		UpdateProcessPriority();
 
-		trayIcon->setIcon(QIcon(":/res/images/tray_active.png"));
+		if (trayIcon)
+			trayIcon->setIcon(QIcon(":/res/images/tray_active.png"));
 	}
 }
 
@@ -3656,7 +3677,8 @@ inline void OBSBasic::OnDeactivate()
 		App()->DecrementSleepInhibition();
 		ClearProcessPriority();
 
-		trayIcon->setIcon(QIcon(":/res/images/obs.png"));
+		if (trayIcon)
+			trayIcon->setIcon(QIcon(":/res/images/obs.png"));
 	}
 }
 
@@ -3698,8 +3720,11 @@ void OBSBasic::StreamDelayStarting(int sec)
 {
 	ui->streamButton->setText(QTStr("Basic.Main.StopStreaming"));
 	ui->streamButton->setEnabled(true);
-	sysTrayStream->setText(ui->streamButton->text());
-	sysTrayStream->setEnabled(true);
+
+	if (sysTrayStream) {
+		sysTrayStream->setText(ui->streamButton->text());
+		sysTrayStream->setEnabled(true);
+	}
 
 	if (!startStreamMenu.isNull())
 		startStreamMenu->deleteLater();
@@ -3720,8 +3745,11 @@ void OBSBasic::StreamDelayStopping(int sec)
 {
 	ui->streamButton->setText(QTStr("Basic.Main.StartStreaming"));
 	ui->streamButton->setEnabled(true);
-	sysTrayStream->setText(ui->streamButton->text());
-	sysTrayStream->setEnabled(true);
+
+	if (sysTrayStream) {
+		sysTrayStream->setText(ui->streamButton->text());
+		sysTrayStream->setEnabled(true);
+	}
 
 	if (!startStreamMenu.isNull())
 		startStreamMenu->deleteLater();
@@ -3741,8 +3769,11 @@ void OBSBasic::StreamingStart()
 	ui->streamButton->setText(QTStr("Basic.Main.StopStreaming"));
 	ui->streamButton->setEnabled(true);
 	ui->statusbar->StreamStarted(outputHandler->streamOutput);
-	sysTrayStream->setText(ui->streamButton->text());
-	sysTrayStream->setEnabled(true);
+
+	if (sysTrayStream) {
+		sysTrayStream->setText(ui->streamButton->text());
+		sysTrayStream->setEnabled(true);
+	}
 
 	if (api)
 		api->on_event(OBS_FRONTEND_EVENT_STREAMING_STARTED);
@@ -3755,7 +3786,9 @@ void OBSBasic::StreamingStart()
 void OBSBasic::StreamStopping()
 {
 	ui->streamButton->setText(QTStr("Basic.Main.StoppingStreaming"));
-	sysTrayStream->setText(ui->streamButton->text());
+
+	if (sysTrayStream)
+		sysTrayStream->setText(ui->streamButton->text());
 
 	streamingStopping = true;
 	if (api)
@@ -3794,8 +3827,11 @@ void OBSBasic::StreamingStop(int code)
 
 	ui->streamButton->setText(QTStr("Basic.Main.StartStreaming"));
 	ui->streamButton->setEnabled(true);
-	sysTrayStream->setText(ui->streamButton->text());
-	sysTrayStream->setEnabled(true);
+
+	if (sysTrayStream) {
+		sysTrayStream->setText(ui->streamButton->text());
+		sysTrayStream->setEnabled(true);
+	}
 
 	streamingStopping = false;
 	if (api)
@@ -3835,7 +3871,9 @@ void OBSBasic::StartRecording()
 void OBSBasic::RecordStopping()
 {
 	ui->recordButton->setText(QTStr("Basic.Main.StoppingRecording"));
-	sysTrayRecord->setText(ui->recordButton->text());
+
+	if (sysTrayRecord)
+		sysTrayRecord->setText(ui->recordButton->text());
 
 	recordingStopping = true;
 	if (api)
@@ -3856,7 +3894,9 @@ void OBSBasic::RecordingStart()
 {
 	ui->statusbar->RecordingStarted(outputHandler->fileOutput);
 	ui->recordButton->setText(QTStr("Basic.Main.StopRecording"));
-	sysTrayRecord->setText(ui->recordButton->text());
+
+	if (sysTrayRecord)
+		sysTrayRecord->setText(ui->recordButton->text());
 
 	recordingStopping = false;
 	if (api)
@@ -3871,7 +3911,9 @@ void OBSBasic::RecordingStop(int code)
 {
 	ui->statusbar->RecordingStopped();
 	ui->recordButton->setText(QTStr("Basic.Main.StartRecording"));
-	sysTrayRecord->setText(ui->recordButton->text());
+
+	if (sysTrayRecord)
+		sysTrayRecord->setText(ui->recordButton->text());
 	blog(LOG_INFO, RECORDING_STOP);
 
 	if (code == OBS_OUTPUT_UNSUPPORTED && isVisible()) {
@@ -4458,6 +4500,9 @@ void OBSBasic::UpdateTitleBar()
 		name << "Studio ";
 
 	name << App()->GetVersionString();
+	if (App()->IsPortableMode())
+		name << " - Portable Mode";
+
 	name << " - " << Str("TitleBar.Profile") << ": " << profile;
 	name << " - " << Str("TitleBar.Scenes") << ": " << sceneCollection;
 
@@ -4527,7 +4572,8 @@ void OBSBasic::SetShowing(bool showing)
 			"BasicWindow", "geometry",
 			saveGeometry().toBase64().constData());
 
-		showHide->setText(QTStr("Basic.SystemTray.Show"));
+		if (showHide)
+			showHide->setText(QTStr("Basic.SystemTray.Show"));
 		QTimer::singleShot(250, this, SLOT(hide()));
 
 		if (previewEnabled)
@@ -4536,7 +4582,8 @@ void OBSBasic::SetShowing(bool showing)
 		setVisible(false);
 
 	} else if (showing && !isVisible()) {
-		showHide->setText(QTStr("Basic.SystemTray.Hide"));
+		if (showHide)
+			showHide->setText(QTStr("Basic.SystemTray.Hide"));
 		QTimer::singleShot(250, this, SLOT(show()));
 
 		if (previewEnabled)
@@ -4546,7 +4593,8 @@ void OBSBasic::SetShowing(bool showing)
 	}
 }
 
-void OBSBasic::SystemTrayInit() {
+void OBSBasic::SystemTrayInit()
+{
 	trayIcon = new QSystemTrayIcon(QIcon(":/res/images/obs.png"),
 			this);
 	trayIcon->setToolTip("OBS Studio");
