@@ -1,5 +1,21 @@
 @echo off
 
+git describe > VERSION
+set /p VERSION= < VERSION
+del VERSION
+set VERSION=%VERSION:-=                              %
+set VERSION=%VERSION:~0,30%
+set VERSION=%VERSION: =%
+
+set OBS_INSTALL_PREFIX="F:/Program Files/OBS Studio/%VERSION%"
+
+if exist %OBS_INSTALL_PREFIX% goto args
+echo Directory "%OBS_INSTALL_PREFIX" does not exist.
+echo Make sure you have OBS Studio %VERSION% installed.
+goto done
+
+:args
+
 if "%1"=="2013" goto vs2013
 if "%1"=="2015" goto vs2015
 
@@ -19,6 +35,8 @@ set cmgen="Visual Studio 14 2015 Win64"
 goto common
 
 :common
+echo Building for OBS Studio %VERSION%.
+
 if not exist build64 goto common1
 rd/s/q build64
 if not exist build64 goto common1
@@ -28,7 +46,7 @@ goto done
 :common1
 mkdir build64
 cd build64
-cmake -DCMAKE_INSTALL_PREFIX:PATH="F:/Program Files/OBS Studio" -G %cmgen% ..
+cmake -DCMAKE_INSTALL_PREFIX:PATH="%OBS_INSTALL_PREFIX%" -G %cmgen% ..
 cd ..
 goto done
 
