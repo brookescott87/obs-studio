@@ -174,7 +174,7 @@ bool obs_source_init(struct obs_source *source)
 	source->control = bzalloc(sizeof(obs_weak_source_t));
 	source->deinterlace_top_first = true;
 	source->control->source = source;
-	source->audio_mixers = 0xF;
+	source->audio_mixers = 0xFF;
 
 	if (is_audio_source(source)) {
 		pthread_mutex_lock(&obs->data.audio_sources_mutex);
@@ -410,7 +410,9 @@ obs_source_t *obs_source_duplicate(obs_source_t *source,
 		obs_scene_t *new_scene = obs_scene_duplicate(scene, new_name,
 				create_private ? OBS_SCENE_DUP_PRIVATE_COPY :
 					OBS_SCENE_DUP_COPY);
-		return obs_scene_get_source(new_scene);
+		obs_source_t *new_source = obs_scene_get_source(new_scene);
+		duplicate_filters(new_source, source, create_private);
+		return new_source;
 	}
 
 	settings = obs_data_create();
@@ -919,6 +921,35 @@ void obs_source_deactivate(obs_source_t *source, enum view_type type)
 
 static inline struct obs_source_frame *get_closest_frame(obs_source_t *source,
 		uint64_t sys_time);
+bool set_async_texture_size(struct obs_source *source,
+		const struct obs_source_frame *frame);
+
+static void async_tick(obs_source_t *source)
+{
+	uint64_t sys_time = obs->video.video_time;
+
+	pthread_mutex_lock(&source->async_mutex);
+
+	if (deinterlacing_enabled(source)) {
+		deinterlace_process_last_frame(source, sys_time);
+	} else {
+		if (source->cur_async_frame) {
+			remove_async_frame(source,
+					source->cur_async_frame);
+			source->cur_async_frame = NULL;
+		}
+
+		source->cur_async_frame = get_closest_frame(source,
+				sys_time);
+	}
+
+	source->last_sys_timestamp = sys_time;
+	pthread_mutex_unlock(&source->async_mutex);
+
+	if (source->cur_async_frame)
+		source->async_update_texture = set_async_texture_size(source,
+				source->cur_async_frame);
+}
 
 void obs_source_video_tick(obs_source_t *source, float seconds)
 {
@@ -930,27 +961,8 @@ void obs_source_video_tick(obs_source_t *source, float seconds)
 	if (source->info.type == OBS_SOURCE_TYPE_TRANSITION)
 		obs_transition_tick(source);
 
-	if ((source->info.output_flags & OBS_SOURCE_ASYNC) != 0) {
-		uint64_t sys_time = obs->video.video_time;
-
-		pthread_mutex_lock(&source->async_mutex);
-
-		if (deinterlacing_enabled(source)) {
-			deinterlace_process_last_frame(source, sys_time);
-		} else {
-			if (source->cur_async_frame) {
-				remove_async_frame(source,
-						source->cur_async_frame);
-				source->cur_async_frame = NULL;
-			}
-
-			source->cur_async_frame = get_closest_frame(source,
-					sys_time);
-		}
-
-		source->last_sys_timestamp = sys_time;
-		pthread_mutex_unlock(&source->async_mutex);
-	}
+	if ((source->info.output_flags & OBS_SOURCE_ASYNC) != 0)
+		async_tick(source);
 
 	if (source->defer_update)
 		obs_source_deferred_update(source);
@@ -1331,6 +1343,8 @@ bool set_async_texture_size(struct obs_source *source,
 	source->async_height = frame->height;
 	source->async_format = frame->format;
 
+	gs_enter_context(obs->video.graphics);
+
 	gs_texture_destroy(source->async_texture);
 	gs_texture_destroy(source->async_prev_texture);
 	gs_texrender_destroy(source->async_texrender);
@@ -1364,6 +1378,8 @@ bool set_async_texture_size(struct obs_source *source,
 
 	if (deinterlacing_enabled(source))
 		set_deinterlace_texture_size(source);
+
+	gs_leave_context();
 
 	return !!source->async_texture;
 }
@@ -1612,10 +1628,11 @@ static void obs_source_update_async_video(obs_source_t *source)
 				os_gettime_ns() - frame->timestamp;
 			source->timing_set = true;
 
-			if (set_async_texture_size(source, frame)) {
+			if (source->async_update_texture) {
 				update_async_texture(source, frame,
 						source->async_texture,
 						source->async_texrender);
+				source->async_update_texture = false;
 			}
 
 			obs_source_release_frame(source, frame);
@@ -2081,6 +2098,41 @@ static inline void copy_frame_data_plane(struct obs_source_frame *dst,
 				dst->linesize[plane] * lines);
 }
 
+static void copy_frame_data_line_y800(uint32_t *dst, uint8_t *src, uint8_t *end)
+{
+	while (src < end) {
+		register uint32_t val = *(src++);
+		val |= (val << 8);
+		val |= (val << 16);
+		*(dst++) = val;
+	}
+}
+
+static inline void copy_frame_data_y800(struct obs_source_frame *dst,
+		const struct obs_source_frame *src)
+{
+	uint32_t *ptr_dst;
+	uint8_t  *ptr_src;
+	uint8_t  *src_end;
+
+	if ((src->linesize[0] * 4) != dst->linesize[0]) {
+		for (uint32_t cy = 0; cy < src->height; cy++) {
+			ptr_dst = (uint32_t*)
+				(dst->data[0] + cy * dst->linesize[0]);
+			ptr_src = (src->data[0] + cy * src->linesize[0]);
+			src_end = ptr_src + src->width;
+
+			copy_frame_data_line_y800(ptr_dst, ptr_src, src_end);
+		}
+	} else {
+		ptr_dst = (uint32_t*)dst->data[0];
+		ptr_src = (uint8_t *)src->data[0];
+		src_end = ptr_src + src->height * src->linesize[0];
+
+		copy_frame_data_line_y800(ptr_dst, ptr_src, src_end);
+	}
+}
+
 static void copy_frame_data(struct obs_source_frame *dst,
 		const struct obs_source_frame *src)
 {
@@ -2094,7 +2146,7 @@ static void copy_frame_data(struct obs_source_frame *dst,
 		memcpy(dst->color_range_max, src->color_range_max, size);
 	}
 
-	switch (dst->format) {
+	switch (src->format) {
 	case VIDEO_FORMAT_I420:
 		copy_frame_data_plane(dst, src, 0, dst->height);
 		copy_frame_data_plane(dst, src, 1, dst->height/2);
@@ -2115,12 +2167,16 @@ static void copy_frame_data(struct obs_source_frame *dst,
 	case VIDEO_FORMAT_YVYU:
 	case VIDEO_FORMAT_YUY2:
 	case VIDEO_FORMAT_UYVY:
-	case VIDEO_FORMAT_Y800:
 	case VIDEO_FORMAT_NONE:
 	case VIDEO_FORMAT_RGBA:
 	case VIDEO_FORMAT_BGRA:
 	case VIDEO_FORMAT_BGRX:
 		copy_frame_data_plane(dst, src, 0, dst->height);
+		break;
+
+	case VIDEO_FORMAT_Y800:
+		copy_frame_data_y800(dst, src);
+		break;
 	}
 }
 
@@ -2201,8 +2257,12 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source,
 
 	if (!new_frame) {
 		struct async_frame new_af;
+		enum video_format format = frame->format;
 
-		new_frame = obs_source_frame_create(frame->format,
+		if (format == VIDEO_FORMAT_Y800)
+			format = VIDEO_FORMAT_BGRX;
+
+		new_frame = obs_source_frame_create(format,
 				frame->width, frame->height);
 		new_af.frame = new_frame;
 		new_af.used = true;
