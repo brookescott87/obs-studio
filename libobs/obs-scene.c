@@ -162,7 +162,7 @@ static void scene_destroy(void *data)
 
 static void scene_enum_sources(void *data,
 		obs_source_enum_proc_t enum_callback,
-		void *param)
+		void *param, bool active)
 {
 	struct obs_scene *scene = data;
 	struct obs_scene_item *item;
@@ -175,7 +175,7 @@ static void scene_enum_sources(void *data,
 		next = item->next;
 
 		obs_sceneitem_addref(item);
-		if (os_atomic_load_long(&item->active_refs) > 0)
+		if (!active || os_atomic_load_long(&item->active_refs) > 0)
 			enum_callback(scene->source, item->source, param);
 		obs_sceneitem_release(item);
 
@@ -183,6 +183,20 @@ static void scene_enum_sources(void *data,
 	}
 
 	full_unlock(scene);
+}
+
+static void scene_enum_active_sources(void *data,
+		obs_source_enum_proc_t enum_callback,
+		void *param)
+{
+	scene_enum_sources(data, enum_callback, param, true);
+}
+
+static void scene_enum_all_sources(void *data,
+		obs_source_enum_proc_t enum_callback,
+		void *param)
+{
+	scene_enum_sources(data, enum_callback, param, false);
 }
 
 static inline void detach_sceneitem(struct obs_scene_item *item)
@@ -869,7 +883,7 @@ static bool scene_audio_render(void *data, uint64_t *ts_out,
 			uint64_t source_ts =
 				obs_source_get_audio_timestamp(item->source);
 
-			if (!timestamp || source_ts < timestamp)
+			if (source_ts && (!timestamp || source_ts < timestamp))
 				timestamp = source_ts;
 		}
 
@@ -904,6 +918,11 @@ static bool scene_audio_render(void *data, uint64_t *ts_out,
 		}
 
 		source_ts = obs_source_get_audio_timestamp(item->source);
+		if (!source_ts) {
+			item = item->next;
+			continue;
+		}
+
 		pos = (size_t)ns_to_audio_frames(sample_rate,
 				source_ts - timestamp);
 		count = AUDIO_OUTPUT_FRAMES - pos;
@@ -957,7 +976,8 @@ const struct obs_source_info scene_info =
 	.get_height    = scene_getheight,
 	.load          = scene_load,
 	.save          = scene_save,
-	.enum_active_sources = scene_enum_sources
+	.enum_active_sources = scene_enum_active_sources,
+	.enum_all_sources = scene_enum_all_sources
 };
 
 obs_scene_t *obs_scene_create(const char *name)
@@ -1072,6 +1092,8 @@ obs_scene_t *obs_scene_duplicate(obs_scene_t *scene, const char *name,
 			new_item->align = item->align;
 			new_item->last_width = item->last_width;
 			new_item->last_height = item->last_height;
+			new_item->output_scale = item->output_scale;
+			new_item->scale_filter = item->scale_filter;
 			new_item->box_transform = item->box_transform;
 			new_item->draw_transform = item->draw_transform;
 			new_item->bounds_type = item->bounds_type;
@@ -1378,8 +1400,7 @@ void obs_sceneitem_remove(obs_sceneitem_t *item)
 
 	scene = item->parent;
 
-	if (scene)
-		full_lock(scene);
+	full_lock(scene);
 
 	if (item->removed) {
 		if (scene)
