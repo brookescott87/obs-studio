@@ -13,8 +13,8 @@ set cmgen="Visual Studio 12 2013 Win64"
 goto common
 
 :vs2015
-goto nosuch
 set DepsPath=%HOMEDRIVE%%HOMEPATH%/Library/obs-studio-dependencies/2015/include
+set QTDIR=c:/Qt/Qt5.7.0/5.7/msvc2015_64
 set cmgen="Visual Studio 14 2015 Win64"
 goto common
 
