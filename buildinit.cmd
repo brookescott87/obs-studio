@@ -7,7 +7,8 @@ set VERSION=%VERSION:-=                              %
 set VERSION=%VERSION:~0,30%
 set VERSION=%VERSION: =%
 
-set OBS_INSTALL_PREFIX="%OBS_ROOT%/%VERSION%"
+set OBS_ROOT_=%OBS_ROOT:\=/%
+set OBS_INSTALL_PREFIX=%OBS_ROOT_%/%VERSION%
 
 if exist %OBS_INSTALL_PREFIX% goto args
 echo Directory "%OBS_INSTALL_PREFIX%" does not exist.
@@ -36,7 +37,7 @@ set cmgen="Visual Studio 14 2015 Win64"
 goto common
 
 :vs2017
-set DepsPath=%OBS_ROOT%/dependencies/2015/win64/include
+set DepsPath=%OBS_ROOT_%/dependencies/2015/win64/include
 set QTDIR=D:/Qt/5.10.1/msvc2017_64
 set cmgen="Visual Studio 15 2017 Win64"
 
