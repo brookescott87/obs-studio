@@ -10,7 +10,7 @@ set VERSION=%VERSION: =%
 set OBS_INSTALL_PREFIX="%OBS_ROOT%/%VERSION%"
 
 if exist %OBS_INSTALL_PREFIX% goto args
-echo Directory "%OBS_INSTALL_PREFIX" does not exist.
+echo Directory "%OBS_INSTALL_PREFIX%" does not exist.
 echo Make sure you have OBS Studio %VERSION% installed.
 goto done
 
