@@ -682,7 +682,6 @@ obs_data_t *obs_data_create_from_json_file_safe(const char *json_file,
 
 			/* delete current file if corrupt to prevent it from
 			 * being backed up again */
-			os_unlink(json_file);
 			os_rename(backup_file.array, json_file);
 
 			file_data = obs_data_create_from_json_file(json_file);
@@ -855,7 +854,7 @@ static inline void set_item_def(struct obs_data *data, obs_data_item_t **item,
 		item = &actual_item;
 	}
 
-	if (item && *item && (*item)->type == type)
+	if (item && *item && (*item)->type != type)
 		return;
 
 	set_item_data(data, item, name, ptr, size, type, true, false);

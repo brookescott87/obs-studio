@@ -293,6 +293,9 @@ static void update_params(struct obs_qsv *obsqsv, obs_data_t *settings)
 	bool cbr_override = obs_data_get_bool(settings, "cbr");
 	int bFrames = 7;
 
+	if (obs_data_has_user_value(settings, "bf"))
+		bFrames = (int)obs_data_get_int(settings, "bf");
+
 	int width = (int)obs_encoder_get_width(obsqsv->encoder);
 	int height = (int)obs_encoder_get_height(obsqsv->encoder);
 	if (astrcmpi(target_usage, "quality") == 0)
@@ -408,7 +411,7 @@ static bool update_settings(struct obs_qsv *obsqsv, obs_data_t *settings)
 static void load_headers(struct obs_qsv *obsqsv)
 {
 	DARRAY(uint8_t) header;
-	uint8_t sei = 0;
+	static uint8_t sei = 0;
 
 	// Not sure if SEI is needed.
 	// Just filling in empty meaningless SEI message.
@@ -635,7 +638,7 @@ static void parse_packet(struct obs_qsv *obsqsv, struct encoder_packet *packet, 
 	//int iType = iFrame ? 0 : (bFrame ? 1 : (pFrame ? 2 : -1));
 	//int64_t interval = obsqsv->params.nbFrames + 1;
 
-	// In case MSDK does't support automatic DecodeTimeStamp, do manual
+	// In case MSDK doesn't support automatic DecodeTimeStamp, do manual
 	// calculation
 	if (g_pts2dtsShift >= 0)
 	{

@@ -29,6 +29,21 @@ ULONG DeckLinkDevice::Release()
 
 bool DeckLinkDevice::Init()
 {
+	ComPtr<IDeckLinkAttributes> attributes;
+	const HRESULT result = device->QueryInterface(IID_IDeckLinkAttributes,
+			(void **)&attributes);
+
+	if (result == S_OK) {
+		decklink_bool_t detectable = false;
+		if (attributes->GetFlag(BMDDeckLinkSupportsInputFormatDetection,
+				&detectable) == S_OK && !!detectable) {
+			DeckLinkDeviceMode *mode =
+				new DeckLinkDeviceMode("Auto", MODE_ID_AUTO);
+			modes.push_back(mode);
+			modeIdMap[MODE_ID_AUTO] = mode;
+		}
+	}
+
 	ComPtr<IDeckLinkInput> input;
 	if (device->QueryInterface(IID_IDeckLinkInput, (void**)&input) != S_OK)
 		return false;
@@ -66,11 +81,17 @@ bool DeckLinkDevice::Init()
 
 	hash = displayName;
 
-	ComPtr<IDeckLinkAttributes> attributes;
-	const HRESULT result = device->QueryInterface(IID_IDeckLinkAttributes,
-			(void **)&attributes);
 	if (result != S_OK)
 		return true;
+
+	int64_t channels;
+	/* Intensity Shuttle for Thunderbolt return 2; however, it supports 8 channels */
+	if (name == "Intensity Shuttle Thunderbolt")
+		maxChannel = 8;
+	else if (attributes->GetInt(BMDDeckLinkMaximumAudioChannels, &channels) == S_OK)
+		maxChannel = (int32_t)channels;
+	else
+		maxChannel = 2;
 
 	/* http://forum.blackmagicdesign.com/viewtopic.php?f=12&t=33967
 	 * BMDDeckLinkTopologicalID for older devices
@@ -117,4 +138,9 @@ const std::vector<DeckLinkDeviceMode *>& DeckLinkDevice::GetModes(void) const
 const std::string& DeckLinkDevice::GetName(void) const
 {
 	return name;
+}
+
+int32_t DeckLinkDevice::GetMaxChannel(void) const
+{
+	return maxChannel;
 }

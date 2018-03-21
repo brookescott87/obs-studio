@@ -59,6 +59,7 @@ static int ctx_visual_attribs[] = {
 	GLX_STENCIL_SIZE, 0,
 	GLX_DEPTH_SIZE, 0,
 	GLX_BUFFER_SIZE, 32,
+	GLX_ALPHA_SIZE, 8,
 	GLX_DOUBLEBUFFER, true,
 	GLX_X_RENDERABLE, true,
 	None
@@ -365,8 +366,6 @@ extern struct gl_platform *gl_platform_create(gs_device_t *device,
 		blog(LOG_ERROR, "Failed to load OpenGL entry functions.");
 		goto fail_load_gl;
 	}
-
-	blog(LOG_INFO, "OpenGL version: %s\n", glGetString(GL_VERSION));
 
 	goto success;
 

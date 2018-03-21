@@ -49,13 +49,13 @@ enum {
 	 * Use if a problem occurs that doesn't affect the program and is
 	 * recoverable.
 	 *
-	 * Use in places where where failure isn't entirely unexpected, and can
+	 * Use in places where failure isn't entirely unexpected, and can
 	 * be handled safely.
 	 */
 	LOG_WARNING = 200,
 
 	/**
-	 * Informative essage to be displayed in the log.
+	 * Informative message to be displayed in the log.
 	 */
 	LOG_INFO    = 300,
 
@@ -76,7 +76,7 @@ EXPORT void base_set_crash_handler(
 
 EXPORT void blogva(int log_level, const char *format, va_list args);
 
-#ifndef _MSC_VER
+#if !defined(_MSC_VER) && !defined(SWIG)
 #define PRINTFATTR(f, a) __attribute__((__format__(__printf__, f, a)))
 #else
 #define PRINTFATTR(f, a)

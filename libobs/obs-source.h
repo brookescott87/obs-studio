@@ -123,10 +123,17 @@ enum obs_source_type {
 /**
  * Source cannot have its audio monitored
  *
- * Specifies that this source may cause a feedback loop if audio is monitored.
+ * Specifies that this source may cause a feedback loop if audio is monitored
+ * with a device selected as desktop audio.
+ *
  * This is used primarily with desktop audio capture sources.
  */
-#define OBS_SOURCE_DO_NOT_MONITOR (1<<9)
+#define OBS_SOURCE_DO_NOT_SELF_MONITOR (1<<9)
+
+/**
+ * Source type is currently disabled and should not be shown to the user
+ */
+#define OBS_SOURCE_CAP_DISABLED (1<<10)
 
 /** @} */
 
@@ -171,7 +178,7 @@ struct obs_source_info {
 	 * Creates the source data for the source
 	 *
 	 * @param  settings  Settings to initialize the source with
-	 * @param  source    Source that this data is assoicated with
+	 * @param  source    Source that this data is associated with
 	 * @return           The data associated with this source
 	 */
 	void *(*create)(obs_data_t *settings, obs_source_t *source);
@@ -199,6 +206,7 @@ struct obs_source_info {
 	 * Gets the default settings for this source
 	 *
 	 * @param[out]  settings  Data to assign default settings to
+	 * @deprecated            Use get_defaults2 if type_data is needed
 	 */
 	void (*get_defaults)(obs_data_t *settings);
 
@@ -206,6 +214,7 @@ struct obs_source_info {
 	 * Gets the property information of this source
 	 *
 	 * @return         The properties data
+	 * @deprecated     Use get_properties2 if type_data is needed
 	 */
 	obs_properties_t *(*get_properties)(void *data);
 
@@ -257,7 +266,7 @@ struct obs_source_info {
 	 * If the source output flags do not include SOURCE_CUSTOM_DRAW, all
 	 * a source needs to do is set the "image" parameter of the effect to
 	 * the desired texture, and then draw.  If the output flags include
-	 * SOURCE_COLOR_MATRIX, you may optionally set the the "color_matrix"
+	 * SOURCE_COLOR_MATRIX, you may optionally set the "color_matrix"
 	 * parameter of the effect to a custom 4x4 conversion matrix (by
 	 * default it will be set to an YUV->RGB conversion matrix)
 	 *
@@ -423,13 +432,33 @@ struct obs_source_info {
 	void (*enum_all_sources)(void *data,
 			obs_source_enum_proc_t enum_callback,
 			void *param);
+
+	void (*transition_start)(void *data);
+	void (*transition_stop)(void *data);
+
+	/**
+	 * Gets the default settings for this source
+	 *
+	 * @param       type_data The type_data variable of this structure
+	 * @param[out]  settings  Data to assign default settings to
+	 */
+	void (*get_defaults2)(void *type_data, obs_data_t *settings);
+
+	/**
+	 * Gets the property information of this source
+	 *
+	 * @param data      Source data
+	 * @param type_data The type_data variable of this structure
+	 * @return          The properties data
+	 */
+	obs_properties_t *(*get_properties2)(void *data, void *type_data);
 };
 
 EXPORT void obs_register_source_s(const struct obs_source_info *info,
 		size_t size);
 
 /**
- * Regsiters a source definition to the current obs context.  This should be
+ * Registers a source definition to the current obs context.  This should be
  * used in obs_module_load.
  *
  * @param  info  Pointer to the source definition structure

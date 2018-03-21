@@ -4,11 +4,14 @@
 #include <jansson.h>
 
 #include "rtmp-format-ver.h"
+#include "twitch.h"
 
 struct rtmp_common {
 	char *service;
 	char *server;
 	char *key;
+
+	char *output;
 };
 
 static const char *rtmp_common_getname(void *unused)
@@ -17,17 +20,42 @@ static const char *rtmp_common_getname(void *unused)
 	return obs_module_text("StreamingServices");
 }
 
+static json_t *open_services_file(void);
+static inline json_t *find_service(json_t *root, const char *name);
+static inline const char *get_string_val(json_t *service, const char *key);
+
+extern void twitch_ingests_refresh(int seconds);
+
 static void rtmp_common_update(void *data, obs_data_t *settings)
 {
 	struct rtmp_common *service = data;
 
 	bfree(service->service);
 	bfree(service->server);
+	bfree(service->output);
 	bfree(service->key);
 
 	service->service = bstrdup(obs_data_get_string(settings, "service"));
 	service->server  = bstrdup(obs_data_get_string(settings, "server"));
 	service->key     = bstrdup(obs_data_get_string(settings, "key"));
+	service->output  = NULL;
+
+	json_t *root = open_services_file();
+	if (root) {
+		json_t *serv = find_service(root, service->service);
+		if (serv) {
+			json_t *rec = json_object_get(serv, "recommended");
+			if (rec && json_is_object(rec)) {
+				const char *out = get_string_val(rec, "output");
+				if (out)
+					service->output = bstrdup(out);
+			}
+		}
+	}
+	json_decref(root);
+
+	if (!service->output)
+		service->output = bstrdup("rtmp_output");
 }
 
 static void rtmp_common_destroy(void *data)
@@ -36,6 +64,7 @@ static void rtmp_common_destroy(void *data)
 
 	bfree(service->service);
 	bfree(service->server);
+	bfree(service->output);
 	bfree(service->key);
 	bfree(service);
 }
@@ -126,6 +155,13 @@ static void add_services(obs_property_t *list, json_t *root, bool show_all,
 	json_array_foreach (root, index, service) {
 		add_service(list, service, show_all, cur_service);
 	}
+
+	service = find_service(root, cur_service);
+	if (!service && cur_service && *cur_service) {
+		obs_property_list_insert_string(list, 0, cur_service,
+				cur_service);
+		obs_property_list_item_disable(list, 0, true);
+	}
 }
 
 static json_t *open_json_file(const char *file)
@@ -152,9 +188,9 @@ static json_t *open_json_file(const char *file)
 	format_ver = get_int_val(root, "format_version");
 
 	if (format_ver != RTMP_SERVICES_FORMAT_VERSION) {
-		blog(LOG_WARNING, "rtmp-common.c: [open_json_file] "
-		                  "Wrong format version (%d), expected %d",
-				  format_ver, RTMP_SERVICES_FORMAT_VERSION);
+		blog(LOG_DEBUG, "rtmp-common.c: [open_json_file] "
+		                "Wrong format version (%d), expected %d",
+		                format_ver, RTMP_SERVICES_FORMAT_VERSION);
 		json_decref(root);
 		return NULL;
 	}
@@ -209,6 +245,35 @@ static void properties_data_destroy(void *data)
 		json_decref(root);
 }
 
+static bool fill_twitch_servers_locked(obs_property_t *servers_prop)
+{
+	size_t count = twitch_ingest_count();
+
+	obs_property_list_add_string(servers_prop,
+			obs_module_text("Server.Auto"), "auto");
+
+	if (count <= 1)
+		return false;
+
+	for (size_t i = 0; i < count; i++) {
+		struct twitch_ingest ing = twitch_ingest(i);
+		obs_property_list_add_string(servers_prop, ing.name, ing.url);
+	}
+
+	return true;
+}
+
+static inline bool fill_twitch_servers(obs_property_t *servers_prop)
+{
+	bool success;
+
+	twitch_ingests_lock();
+	success = fill_twitch_servers_locked(servers_prop);
+	twitch_ingests_unlock();
+
+	return success;
+}
+
 static void fill_servers(obs_property_t *servers_prop, json_t *service,
 		const char *name)
 {
@@ -224,6 +289,15 @@ static void fill_servers(obs_property_t *servers_prop, json_t *service,
 		                  "Servers for service '%s' not a valid object",
 		                  name);
 		return;
+	}
+
+	if (strcmp(name, "Mixer.com - FTL") == 0) {
+		obs_property_list_add_string(servers_prop,
+				obs_module_text("Server.Auto"), "auto");
+	}
+	if (name && strcmp(name, "Twitch") == 0) {
+		if (fill_twitch_servers(servers_prop))
+			return;
 	}
 
 	json_array_foreach (servers, index, server) {
@@ -263,12 +337,20 @@ static bool service_selected(obs_properties_t *props, obs_property_t *p,
 		return false;
 
 	service = find_service(root, name);
-	if (!service)
-		return false;
+	if (!service) {
+		const char *server = obs_data_get_string(settings, "server");
+
+		obs_property_list_insert_string(p, 0, name, name);
+		obs_property_list_item_disable(p, 0, true);
+
+		p = obs_properties_get(props, "server");
+		obs_property_list_insert_string(p, 0, server, server);
+		obs_property_list_item_disable(p, 0, true);
+		return true;
+	}
 
 	fill_servers(obs_properties_get(props, "server"), service, name);
 
-	UNUSED_PARAMETER(p);
 	return true;
 }
 
@@ -346,6 +428,10 @@ static void apply_video_encoder_settings(obs_data_t *settings,
 		}
 	}
 
+	item = json_object_get(recommended, "bframes");
+	if (item && json_is_integer(item))
+		obs_data_set_int(settings, "bf", 0);
+
 	item = json_object_get(recommended, "x264opts");
 	if (item && json_is_string(item)) {
 		const char *x264_settings = json_string_value(item);
@@ -381,9 +467,10 @@ static void initialize_output(struct rtmp_common *service, json_t *root,
 	json_t        *recommended;
 
 	if (!json_service) {
-		blog(LOG_WARNING, "rtmp-common.c: [initialize_output] "
-		                  "Could not find service '%s'",
-		                  service->service);
+		if (service->service && *service->service)
+			blog(LOG_WARNING, "rtmp-common.c: [initialize_output] "
+					  "Could not find service '%s'",
+					  service->service);
 		return;
 	}
 
@@ -410,9 +497,30 @@ static void rtmp_common_apply_settings(void *data,
 	}
 }
 
+static const char *rtmp_common_get_output_type(void *data)
+{
+	struct rtmp_common *service = data;
+	return service->output;
+}
+
 static const char *rtmp_common_url(void *data)
 {
 	struct rtmp_common *service = data;
+
+	if (service->service && strcmp(service->service, "Twitch") == 0) {
+		if (service->server && strcmp(service->server, "auto") == 0) {
+			struct twitch_ingest ing;
+
+			twitch_ingests_refresh(3);
+
+			twitch_ingests_lock();
+			ing = twitch_ingest(0);
+			twitch_ingests_unlock();
+
+			return ing.url;
+		}
+	}
+
 	return service->server;
 }
 
@@ -432,4 +540,5 @@ struct obs_service_info rtmp_common_service = {
 	.get_url        = rtmp_common_url,
 	.get_key        = rtmp_common_key,
 	.apply_encoder_settings = rtmp_common_apply_settings,
+	.get_output_type = rtmp_common_get_output_type,
 };

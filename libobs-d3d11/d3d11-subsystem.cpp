@@ -196,7 +196,9 @@ void gs_device::InitCompiler()
 		ver--;
 	}
 
-	throw "Could not find any D3DCompiler libraries";
+	throw "Could not find any D3DCompiler libraries. Make sure you've "
+		"installed the <a href=\"https://obsproject.com/go/dxwebsetup\">"
+		"DirectX components</a> that OBS Studio requires.";
 }
 
 void gs_device::InitFactory(uint32_t adapterIdx)
@@ -253,7 +255,7 @@ void gs_device::InitDevice(uint32_t adapterIdx)
 	if (FAILED(hr))
 		throw UnsupportedHWError("Failed to create device", hr);
 
-	blog(LOG_INFO, "D3D11 loaded sucessfully, feature level used: %u",
+	blog(LOG_INFO, "D3D11 loaded successfully, feature level used: %u",
 			(unsigned int)levelUsed);
 }
 
@@ -339,7 +341,10 @@ ID3D11BlendState *gs_device::AddBlendState()
 		bd.RenderTarget[i].DestBlendAlpha =
 			ConvertGSBlendType(blendState.destFactorA);
 		bd.RenderTarget[i].RenderTargetWriteMask =
-			D3D11_COLOR_WRITE_ENABLE_ALL;
+			(blendState.redEnabled   ? D3D11_COLOR_WRITE_ENABLE_RED   : 0) |
+			(blendState.greenEnabled ? D3D11_COLOR_WRITE_ENABLE_GREEN : 0) |
+			(blendState.blueEnabled  ? D3D11_COLOR_WRITE_ENABLE_BLUE  : 0) |
+			(blendState.alphaEnabled ? D3D11_COLOR_WRITE_ENABLE_ALPHA : 0) ;
 	}
 
 	SavedBlendState savedState(blendState, bd);
@@ -514,7 +519,7 @@ static inline void EnumD3DAdapters(
 		if (FAILED(hr))
 			continue;
 
-		/* ignore microsoft's 'basic' renderer' */
+		/* ignore Microsoft's 'basic' renderer' */
 		if (desc.VendorId == 0x1414 && desc.DeviceId == 0x8c)
 			continue;
 
@@ -586,7 +591,7 @@ static inline void LogD3DAdapters()
 		if (FAILED(hr))
 			continue;
 
-		/* ignore microsoft's 'basic' renderer' */
+		/* ignore Microsoft's 'basic' renderer' */
 		if (desc.VendorId == 0x1414 && desc.DeviceId == 0x8c)
 			continue;
 
@@ -608,7 +613,7 @@ int device_create(gs_device_t **p_device, uint32_t adapter)
 
 	try {
 		blog(LOG_INFO, "---------------------------------");
-		blog(LOG_INFO, "Initializing D3D11..");
+		blog(LOG_INFO, "Initializing D3D11...");
 		LogD3DAdapters();
 
 		device = new gs_device(adapter);
@@ -929,33 +934,40 @@ enum gs_texture_type device_get_texture_type(const gs_texture_t *texture)
 	return texture->type;
 }
 
-void device_load_vertexbuffer(gs_device_t *device, gs_vertbuffer_t *vertbuffer)
+void gs_device::LoadVertexBufferData()
 {
-	if (device->curVertexBuffer == vertbuffer)
-		return;
-
-	device->curVertexBuffer = vertbuffer;
-
-	if (!device->curVertexShader)
+	if (curVertexBuffer == lastVertexBuffer &&
+	    curVertexShader == lastVertexShader)
 		return;
 
 	vector<ID3D11Buffer*> buffers;
 	vector<uint32_t> strides;
 	vector<uint32_t> offsets;
 
-	if (vertbuffer) {
-		vertbuffer->MakeBufferList(device->curVertexShader,
+	if (curVertexBuffer && curVertexShader) {
+		curVertexBuffer->MakeBufferList(curVertexShader,
 				buffers, strides);
 	} else {
-		size_t buffersToClear =
-			device->curVertexShader->NumBuffersExpected();
+		size_t buffersToClear = curVertexShader
+			? curVertexShader->NumBuffersExpected() : 0;
 		buffers.resize(buffersToClear);
 		strides.resize(buffersToClear);
 	}
 
 	offsets.resize(buffers.size());
-	device->context->IASetVertexBuffers(0, (UINT)buffers.size(),
+	context->IASetVertexBuffers(0, (UINT)buffers.size(),
 			buffers.data(), strides.data(), offsets.data());
+
+	lastVertexBuffer = curVertexBuffer;
+	lastVertexShader = curVertexShader;
+}
+
+void device_load_vertexbuffer(gs_device_t *device, gs_vertbuffer_t *vertbuffer)
+{
+	if (device->curVertexBuffer == vertbuffer)
+		return;
+
+	device->curVertexBuffer = vertbuffer;
 }
 
 void device_load_indexbuffer(gs_device_t *device, gs_indexbuffer_t *indexbuffer)
@@ -1022,7 +1034,6 @@ void device_load_vertexshader(gs_device_t *device, gs_shader_t *vertshader)
 		return;
 
 	gs_vertex_shader *vs = static_cast<gs_vertex_shader*>(vertshader);
-	gs_vertex_buffer *curVB = device->curVertexBuffer;
 
 	if (vertshader) {
 		if (vertshader->type != GS_SHADER_VERTEX) {
@@ -1031,9 +1042,6 @@ void device_load_vertexshader(gs_device_t *device, gs_shader_t *vertshader)
 			                "shader");
 			return;
 		}
-
-		if (curVB)
-			device_load_vertexbuffer(device, NULL);
 
 		shader    = vs->shader;
 		layout    = vs->layout;
@@ -1044,9 +1052,6 @@ void device_load_vertexshader(gs_device_t *device, gs_shader_t *vertshader)
 	device->context->VSSetShader(shader, NULL, 0);
 	device->context->IASetInputLayout(layout);
 	device->context->VSSetConstantBuffers(0, 1, &constants);
-
-	if (vertshader && curVB)
-		device_load_vertexbuffer(device, curVB);
 }
 
 static inline void clear_textures(gs_device_t *device)
@@ -1348,6 +1353,7 @@ void device_draw(gs_device_t *device, enum gs_draw_mode draw_mode,
 		if (effect)
 			gs_effect_update_params(effect);
 
+		device->LoadVertexBufferData();
 		device->UpdateBlendState();
 		device->UpdateRasterState();
 		device->UpdateZStencilState();
@@ -1450,9 +1456,12 @@ void device_present(gs_device_t *device)
 	}
 }
 
+extern "C" void reset_duplicators(void);
+
 void device_flush(gs_device_t *device)
 {
 	device->context->Flush();
+	reset_duplicators();
 }
 
 void device_set_cull_mode(gs_device_t *device, enum gs_cull_mode mode)
@@ -1926,37 +1935,56 @@ void gs_samplerstate_destroy(gs_samplerstate_t *samplerstate)
 
 void gs_vertexbuffer_destroy(gs_vertbuffer_t *vertbuffer)
 {
+	if (vertbuffer && vertbuffer->device->lastVertexBuffer == vertbuffer)
+		vertbuffer->device->lastVertexBuffer = nullptr;
 	delete vertbuffer;
 }
 
-void gs_vertexbuffer_flush(gs_vertbuffer_t *vertbuffer)
+static inline void gs_vertexbuffer_flush_internal(gs_vertbuffer_t *vertbuffer,
+		const gs_vb_data *data)
 {
+	size_t num_tex = data->num_tex < vertbuffer->uvBuffers.size()
+		? data->num_tex
+		: vertbuffer->uvBuffers.size();
+
 	if (!vertbuffer->dynamic) {
 		blog(LOG_ERROR, "gs_vertexbuffer_flush: vertex buffer is "
 		                "not dynamic");
 		return;
 	}
 
-	vertbuffer->FlushBuffer(vertbuffer->vertexBuffer,
-			vertbuffer->vbd.data->points, sizeof(vec3));
+	if (data->points)
+		vertbuffer->FlushBuffer(vertbuffer->vertexBuffer,
+				data->points, sizeof(vec3));
 
-	if (vertbuffer->normalBuffer)
+	if (vertbuffer->normalBuffer && data->normals)
 		vertbuffer->FlushBuffer(vertbuffer->normalBuffer,
-				vertbuffer->vbd.data->normals, sizeof(vec3));
+				data->normals, sizeof(vec3));
 
-	if (vertbuffer->tangentBuffer)
+	if (vertbuffer->tangentBuffer && data->tangents)
 		vertbuffer->FlushBuffer(vertbuffer->tangentBuffer,
-				vertbuffer->vbd.data->tangents, sizeof(vec3));
+				data->tangents, sizeof(vec3));
 
-	if (vertbuffer->colorBuffer)
+	if (vertbuffer->colorBuffer && data->colors)
 		vertbuffer->FlushBuffer(vertbuffer->colorBuffer,
-				vertbuffer->vbd.data->colors, sizeof(uint32_t));
+				data->colors, sizeof(uint32_t));
 
-	for (size_t i = 0; i < vertbuffer->uvBuffers.size(); i++) {
-		gs_tvertarray &tv = vertbuffer->vbd.data->tvarray[i];
+	for (size_t i = 0; i < num_tex; i++) {
+		gs_tvertarray &tv = data->tvarray[i];
 		vertbuffer->FlushBuffer(vertbuffer->uvBuffers[i],
 				tv.array, tv.width*sizeof(float));
 	}
+}
+
+void gs_vertexbuffer_flush(gs_vertbuffer_t *vertbuffer)
+{
+	gs_vertexbuffer_flush_internal(vertbuffer, vertbuffer->vbd.data);
+}
+
+void gs_vertexbuffer_flush_direct(gs_vertbuffer_t *vertbuffer,
+		const gs_vb_data *data)
+{
+	gs_vertexbuffer_flush_internal(vertbuffer, data);
 }
 
 struct gs_vb_data *gs_vertexbuffer_get_data(const gs_vertbuffer_t *vertbuffer)
@@ -1970,7 +1998,8 @@ void gs_indexbuffer_destroy(gs_indexbuffer_t *indexbuffer)
 	delete indexbuffer;
 }
 
-void gs_indexbuffer_flush(gs_indexbuffer_t *indexbuffer)
+static inline void gs_indexbuffer_flush_internal(gs_indexbuffer_t *indexbuffer,
+		const void *data)
 {
 	HRESULT hr;
 
@@ -1983,10 +2012,20 @@ void gs_indexbuffer_flush(gs_indexbuffer_t *indexbuffer)
 	if (FAILED(hr))
 		return;
 
-	memcpy(map.pData, indexbuffer->indices.data,
-			indexbuffer->num * indexbuffer->indexSize);
+	memcpy(map.pData, data, indexbuffer->num * indexbuffer->indexSize);
 
 	indexbuffer->device->context->Unmap(indexbuffer->indexBuffer, 0);
+}
+
+void gs_indexbuffer_flush(gs_indexbuffer_t *indexbuffer)
+{
+	gs_indexbuffer_flush_internal(indexbuffer, indexbuffer->indices.data);
+}
+
+void gs_indexbuffer_flush_direct(gs_indexbuffer_t *indexbuffer,
+		const void *data)
+{
+	gs_indexbuffer_flush_internal(indexbuffer, data);
 }
 
 void *gs_indexbuffer_get_data(const gs_indexbuffer_t *indexbuffer)

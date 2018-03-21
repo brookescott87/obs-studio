@@ -22,6 +22,9 @@ protected:
 	volatile long                         activateRefs = 0;
 	std::recursive_mutex                  deviceMutex;
 	BMDPixelFormat                        pixelFormat = bmdFormat8BitYUV;
+	video_colorspace                      colorSpace = VIDEO_CS_DEFAULT;
+	video_range_type                      colorRange = VIDEO_RANGE_DEFAULT;
+	speaker_layout                        channelFormat = SPEAKERS_STEREO;
 
 	void SaveSettings();
 	static void DevicesChanged(void *param, DeckLinkDevice *device,
@@ -41,7 +44,24 @@ public:
 	{
 		pixelFormat = format;
 	}
+	inline video_colorspace GetColorSpace() const {return colorSpace;}
+	inline void SetColorSpace(video_colorspace format)
+	{
+		colorSpace = format;
+	}
+	inline video_range_type GetColorRange() const {return colorRange;}
+	inline void SetColorRange(video_range_type format)
+	{
+		colorRange = format;
+	}
+	inline speaker_layout GetChannelFormat() const {return channelFormat;}
+	inline void SetChannelFormat(speaker_layout format)
+	{
+		channelFormat = format;
+	}
 
 	bool Activate(DeckLinkDevice *device, long long modeId);
 	void Deactivate();
+
+	bool buffering = false;
 };

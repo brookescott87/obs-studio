@@ -201,14 +201,6 @@ EXPORT bool obs_volmeter_attach_source(obs_volmeter_t *volmeter,
 EXPORT void obs_volmeter_detach_source(obs_volmeter_t *volmeter);
 
 /**
- * @brief Get signal handler for the volume meter object
- * @param volmeter pointer to the volume meter object
- * @return signal handler
- */
-EXPORT signal_handler_t *obs_volmeter_get_signal_handler(
-		obs_volmeter_t *volmeter);
-
-/**
  * @brief Set the update interval for the volume meter
  * @param volmeter pointer to the volume meter object
  * @param ms update interval in ms
@@ -237,22 +229,15 @@ EXPORT void obs_volmeter_set_update_interval(obs_volmeter_t *volmeter,
 EXPORT unsigned int obs_volmeter_get_update_interval(obs_volmeter_t *volmeter);
 
 /**
- * @brief Set the peak hold time for the volume meter
+ * @brief Get the number of channels which are configured for this source.
  * @param volmeter pointer to the volume meter object
- * @param ms peak hold time in ms
  */
-EXPORT void obs_volmeter_set_peak_hold(obs_volmeter_t *volmeter,
-		const unsigned int ms);
+EXPORT int obs_volmeter_get_nr_channels(obs_volmeter_t *volmeter);
 
-/**
- * @brief Get the peak hold time for the volume meter
- * @param volmeter pointer to the volume meter object
- * @return the peak hold time in ms
- */
-EXPORT unsigned int obs_volmeter_get_peak_hold(obs_volmeter_t *volmeter);
-
-typedef void (*obs_volmeter_updated_t)(void *param, float level,
-		float magnitude, float peak, float muted);
+typedef void (*obs_volmeter_updated_t)(void *param,
+		const float magnitude[MAX_AUDIO_CHANNELS],
+		const float peak[MAX_AUDIO_CHANNELS],
+		const float input_peak[MAX_AUDIO_CHANNELS]);
 
 EXPORT void obs_volmeter_add_callback(obs_volmeter_t *volmeter,
 		obs_volmeter_updated_t callback, void *param);

@@ -60,8 +60,10 @@ static log_handler_t def_log_handler;
 
 static string currentLogFile;
 static string lastLogFile;
+static string lastCrashLogFile;
 
-static bool portable_mode = false;
+bool portable_mode = false;
+static bool multi = false;
 static bool log_verbose = false;
 static bool unfiltered_log = false;
 bool opt_start_streaming = false;
@@ -69,6 +71,8 @@ bool opt_start_recording = false;
 bool opt_studio_mode = false;
 bool opt_start_replaybuffer = false;
 bool opt_minimize_tray = false;
+bool opt_allow_opengl = false;
+bool opt_always_on_top = false;
 string opt_starting_collection;
 string opt_starting_profile;
 string opt_starting_scene;
@@ -162,6 +166,7 @@ QObject *CreateShortcutFilter()
 			case Qt::Key_Return:
 				if (dialog && pressed)
 					return false;
+				/* Falls through. */
 			default:
 				hotkey.key = obs_key_from_virtual_key(
 					event->nativeVirtualKey());
@@ -342,11 +347,11 @@ static void do_log(int log_level, const char *msg, va_list args, void *param)
 	def_log_handler(log_level, msg, args2, nullptr);
 #endif
 
-	if (too_many_repeated_entries(logFile, msg, str))
-		return;
-
-	if (log_level <= LOG_INFO || log_verbose)
+	if (log_level <= LOG_INFO || log_verbose) {
+		if (too_many_repeated_entries(logFile, msg, str))
+			return;
 		LogStringChunk(logFile, str);
+	}
 
 #if defined(_WIN32) && defined(OBS_DEBUGBREAK_ON_ERROR)
 	if (log_level <= LOG_ERROR && IsDebuggerPresent())
@@ -407,6 +412,16 @@ bool OBSApp::InitGlobalConfigDefaults()
 			"ShowListboxToolbars", true);
 	config_set_default_bool(globalConfig, "BasicWindow",
 			"ShowStatusBar", true);
+
+	if (!config_get_bool(globalConfig, "General", "Pre21Defaults")) {
+		config_set_default_string(globalConfig, "General",
+				"CurrentTheme", "Dark");
+	}
+
+#ifdef _WIN32
+	config_set_default_bool(globalConfig, "Audio", "DisableAudioDucking",
+			true);
+#endif
 
 #ifdef __APPLE__
 	config_set_default_bool(globalConfig, "Video", "DisableOSXVSync", true);
@@ -576,6 +591,7 @@ static string GetSceneCollectionFileFromName(const char *name)
 bool OBSApp::InitGlobalConfig()
 {
 	char path[512];
+	bool changed = false;
 
 	int len = GetConfigPath(path, sizeof(path),
 			"obs-studio/global.ini");
@@ -599,6 +615,7 @@ bool OBSApp::InitGlobalConfig()
 			config_set_string(globalConfig,
 					"Basic", "SceneCollectionFile",
 					path.c_str());
+			changed = true;
 		}
 	}
 
@@ -610,8 +627,34 @@ bool OBSApp::InitGlobalConfig()
 					opt_starting_profile.c_str());
 			config_set_string(globalConfig, "Basic", "ProfileDir",
 					path.c_str());
+			changed = true;
 		}
 	}
+
+	if (!config_has_user_value(globalConfig, "General", "Pre19Defaults")) {
+		uint32_t lastVersion = config_get_int(globalConfig, "General",
+				"LastVersion");
+		bool useOldDefaults = lastVersion &&
+		    lastVersion < MAKE_SEMANTIC_VERSION(19, 0, 0);
+
+		config_set_bool(globalConfig, "General", "Pre19Defaults",
+				useOldDefaults);
+		changed = true;
+	}
+
+	if (!config_has_user_value(globalConfig, "General", "Pre21Defaults")) {
+		uint32_t lastVersion = config_get_int(globalConfig, "General",
+				"LastVersion");
+		bool useOldDefaults = lastVersion &&
+		    lastVersion < MAKE_SEMANTIC_VERSION(21, 0, 0);
+
+		config_set_bool(globalConfig, "General", "Pre21Defaults",
+				useOldDefaults);
+		changed = true;
+	}
+
+	if (changed)
+		config_save_safe(globalConfig, "tmp", nullptr);
 
 	return InitGlobalConfigDefaults();
 }
@@ -712,14 +755,19 @@ bool OBSApp::SetTheme(std::string name, std::string path)
 bool OBSApp::InitTheme()
 {
 	const char *themeName = config_get_string(globalConfig, "General",
-			"Theme");
+			"CurrentTheme");
+	if (!themeName) {
+		/* Use deprecated "Theme" value if available */
+		themeName = config_get_string(globalConfig,
+				"General", "Theme");
+		if (!themeName)
+			themeName = "Default";
+	}
 
-	if (!themeName)
-		themeName = "Default";
+	if (strcmp(themeName, "Default") != 0 && SetTheme(themeName))
+		return true;
 
-	stringstream t;
-	t << themeName;
-	return SetTheme(t.str());
+	return SetTheme("Default");
 }
 
 OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
@@ -731,6 +779,13 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 
 OBSApp::~OBSApp()
 {
+#ifdef _WIN32
+	bool disableAudioDucking = config_get_bool(globalConfig, "Audio",
+			"DisableAudioDucking");
+	if (disableAudioDucking)
+		DisableAudioDucking(false);
+#endif
+
 #ifdef __APPLE__
 	bool vsyncDiabled = config_get_bool(globalConfig, "Video",
 			"DisableOSXVSync");
@@ -849,6 +904,13 @@ void OBSApp::AppInit()
 	config_set_default_string(globalConfig, "Basic", "SceneCollectionFile",
 			Str("Untitled"));
 
+#ifdef _WIN32
+	bool disableAudioDucking = config_get_bool(globalConfig, "Audio",
+			"DisableAudioDucking");
+	if (disableAudioDucking)
+		DisableAudioDucking(true);
+#endif
+
 #ifdef __APPLE__
 	if (config_get_bool(globalConfig, "Video", "DisableOSXVSync"))
 		EnableOSXVSync(false);
@@ -900,6 +962,8 @@ bool OBSApp::OBSInit()
 
 		blog(LOG_INFO, "Portable mode: %s",
 				portable_mode ? "true" : "false");
+
+		setQuitOnLastWindowClosed(false);
 
 		mainWindow = new OBSBasic();
 
@@ -988,6 +1052,11 @@ const char *OBSApp::GetCurrentLog() const
 	return currentLogFile.c_str();
 }
 
+const char *OBSApp::GetLastCrashLog() const
+{
+	return lastCrashLogFile.c_str();
+}
+
 bool OBSApp::TranslateString(const char *lookupVal, const char **out) const
 {
 	for (obs_frontend_translate_ui_cb cb : translatorHooks) {
@@ -1034,12 +1103,17 @@ static bool expect_token(lexer *lex, const char *str, base_token_type type)
 	return strref_cmp(&token.text, str) == 0;
 }
 
-static uint64_t convert_log_name(const char *name)
+static uint64_t convert_log_name(bool has_prefix, const char *name)
 {
 	BaseLexer  lex;
 	string     year, month, day, hour, minute, second;
 
 	lexer_start(lex, name);
+
+	if (has_prefix) {
+		string temp;
+		if (!get_token(lex, temp, BASETOKEN_ALPHA)) return 0;
+	}
 
 	if (!get_token(lex, year,   BASETOKEN_DIGIT)) return 0;
 	if (!expect_token(lex, "-", BASETOKEN_OTHER)) return 0;
@@ -1057,7 +1131,7 @@ static uint64_t convert_log_name(const char *name)
 	return std::stoull(timestring.str());
 }
 
-static void delete_oldest_file(const char *location)
+static void delete_oldest_file(bool has_prefix, const char *location)
 {
 	BPtr<char>       logDir(GetConfigPathPtr(location));
 	string           oldestLog;
@@ -1075,7 +1149,8 @@ static void delete_oldest_file(const char *location)
 			if (entry->directory || *entry->d_name == '.')
 				continue;
 
-			uint64_t ts = convert_log_name(entry->d_name);
+			uint64_t ts = convert_log_name(has_prefix,
+					entry->d_name);
 
 			if (ts) {
 				if (ts < oldest_ts) {
@@ -1098,9 +1173,10 @@ static void delete_oldest_file(const char *location)
 	}
 }
 
-static void get_last_log(void)
+static void get_last_log(bool has_prefix, const char *subdir_to_use,
+		std::string &last)
 {
-	BPtr<char>       logDir(GetConfigPathPtr("obs-studio/logs"));
+	BPtr<char>       logDir(GetConfigPathPtr(subdir_to_use));
 	struct os_dirent *entry;
 	os_dir_t         *dir        = os_opendir(logDir);
 	uint64_t         highest_ts = 0;
@@ -1110,11 +1186,12 @@ static void get_last_log(void)
 			if (entry->directory || *entry->d_name == '.')
 				continue;
 
-			uint64_t ts = convert_log_name(entry->d_name);
+			uint64_t ts = convert_log_name(has_prefix,
+					entry->d_name);
 
 			if (ts > highest_ts) {
-				lastLogFile = entry->d_name;
-				highest_ts  = ts;
+				last = entry->d_name;
+				highest_ts = ts;
 			}
 		}
 
@@ -1177,17 +1254,28 @@ static void create_log_file(fstream &logFile)
 {
 	stringstream dst;
 
-	get_last_log();
+	get_last_log(false, "obs-studio/logs", lastLogFile);
+#ifdef _WIN32
+	get_last_log(true, "obs-studio/crashes", lastCrashLogFile);
+#endif
 
 	currentLogFile = GenerateTimeDateFilename("txt");
 	dst << "obs-studio/logs/" << currentLogFile.c_str();
 
 	BPtr<char> path(GetConfigPathPtr(dst.str().c_str()));
+
+#ifdef _WIN32
+	BPtr<wchar_t> wpath;
+	os_utf8_to_wcs_ptr(path, 0, &wpath);
+	logFile.open(wpath,
+			ios_base::in | ios_base::out | ios_base::trunc);
+#else
 	logFile.open(path,
 			ios_base::in | ios_base::out | ios_base::trunc);
+#endif
 
 	if (logFile.is_open()) {
-		delete_oldest_file("obs-studio/logs");
+		delete_oldest_file(false, "obs-studio/logs");
 		base_set_log_handler(do_log, &logFile);
 	} else {
 		blog(LOG_ERROR, "Failed to open log file");
@@ -1283,9 +1371,61 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 		OBSTranslator translator;
 
 		create_log_file(logFile);
-		delete_oldest_file("obs-studio/profiler_data");
+		delete_oldest_file(false, "obs-studio/profiler_data");
 
 		program.installTranslator(&translator);
+
+#ifdef _WIN32
+		/* --------------------------------------- */
+		/* check and warn if already running       */
+
+		bool already_running = false;
+		RunOnceMutex rom = GetRunOnceMutex(already_running);
+
+		if (already_running && !multi) {
+			blog(LOG_WARNING, "\n================================");
+			blog(LOG_WARNING, "Warning: OBS is already running!");
+			blog(LOG_WARNING, "================================\n");
+
+			QMessageBox::StandardButtons buttons(
+					QMessageBox::Yes | QMessageBox::Cancel);
+			QMessageBox mb(QMessageBox::Question,
+					QTStr("AlreadyRunning.Title"),
+					QTStr("AlreadyRunning.Text"),
+					buttons,
+					nullptr);
+			mb.setButtonText(QMessageBox::Yes,
+					QTStr("AlreadyRunning.LaunchAnyway"));
+			mb.setButtonText(QMessageBox::Cancel, QTStr("Cancel"));
+			mb.setDefaultButton(QMessageBox::Cancel);
+
+			QMessageBox::StandardButton button;
+			button = (QMessageBox::StandardButton)mb.exec();
+			if (button == QMessageBox::Cancel) {
+				blog(LOG_INFO, "User shut down the program "
+						"because OBS was already "
+						"running");
+				return 0;
+			}
+
+			blog(LOG_WARNING, "User is now running a secondary "
+					"instance of OBS!");
+
+		} else if (already_running && multi) {
+			blog(LOG_INFO, "User enabled --multi flag and is now "
+					"running multiple instances of OBS.");
+		}
+
+		/* --------------------------------------- */
+#endif
+		if (argc > 1) {
+			stringstream stor;
+			stor << argv[1];
+			for (int i = 2; i < argc; ++i) {
+				stor << " " << argv[i];
+			}
+			blog(LOG_INFO, "Command Line Arguments: %s", stor.str().c_str());
+		}
 
 		if (!program.OBSInit())
 			return 0;
@@ -1302,7 +1442,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 	return ret;
 }
 
-#define MAX_CRASH_REPORT_SIZE (50 * 1024)
+#define MAX_CRASH_REPORT_SIZE (150 * 1024)
 
 #ifdef _WIN32
 
@@ -1318,7 +1458,7 @@ static void main_crash_handler(const char *format, va_list args, void *param)
 	vsnprintf(text, MAX_CRASH_REPORT_SIZE, format, args);
 	text[MAX_CRASH_REPORT_SIZE - 1] = 0;
 
-	delete_oldest_file("obs-studio/crashes");
+	delete_oldest_file(true, "obs-studio/crashes");
 
 	string name = "obs-studio/crashes/Crash ";
 	name += GenerateTimeDateFilename("txt");
@@ -1326,8 +1466,16 @@ static void main_crash_handler(const char *format, va_list args, void *param)
 	BPtr<char> path(GetConfigPathPtr(name.c_str()));
 
 	fstream file;
-	file.open(path, ios_base::in | ios_base::out | ios_base::trunc |
+
+#ifdef _WIN32
+	BPtr<wchar_t> wpath;
+	os_utf8_to_wcs_ptr(path, 0, &wpath);
+	file.open(wpath, ios_base::in | ios_base::out | ios_base::trunc |
 			ios_base::binary);
+#else
+	file.open(path,	ios_base::in | ios_base::out | ios_base::trunc |
+			ios_base::binary);
+#endif
 	file << text;
 	file.close();
 
@@ -1739,6 +1887,7 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef _WIN32
+	SetErrorMode(SEM_FAILCRITICALERRORS);
 	load_debug_privilege();
 	base_set_crash_handler(main_crash_handler, nullptr);
 #endif
@@ -1753,8 +1902,14 @@ int main(int argc, char *argv[])
 		if (arg_is(argv[i], "--portable", "-p")) {
 			portable_mode = true;
 
+		} else if (arg_is(argv[i], "--multi", "-m")) {
+			multi = true;
+
 		} else if (arg_is(argv[i], "--verbose", nullptr)) {
 			log_verbose = true;
+
+		} else if (arg_is(argv[i], "--always-on-top", nullptr)) {
+			opt_always_on_top = true;
 
 		} else if (arg_is(argv[i], "--unfiltered_log", nullptr)) {
 			unfiltered_log = true;
@@ -1783,6 +1938,9 @@ int main(int argc, char *argv[])
 		} else if (arg_is(argv[i], "--studio-mode", nullptr)) {
 			opt_studio_mode = true;
 
+		} else if (arg_is(argv[i], "--allow-opengl", nullptr)) {
+			opt_allow_opengl = true;
+
 		} else if (arg_is(argv[i], "--help", "-h")) {
 			std::cout <<
 			"--help, -h: Get list of available commands.\n\n" << 
@@ -1795,9 +1953,12 @@ int main(int argc, char *argv[])
 			"--scene <string>: Start with specific scene.\n\n" <<
 			"--studio-mode: Enable studio mode.\n" <<
 			"--minimize-to-tray: Minimize to system tray.\n" <<
-			"--portable, -p: Use portable mode.\n\n" <<
+			"--portable, -p: Use portable mode.\n" <<
+			"--multi, -m: Don't warn when launching multiple instances.\n\n" <<
 			"--verbose: Make log more verbose.\n" <<
+			"--always-on-top: Start in 'always on top' mode.\n\n" <<
 			"--unfiltered_log: Make log unfiltered.\n\n" <<
+			"--allow-opengl: Allow OpenGL on Windows.\n\n" <<
 			"--version, -V: Get current version.\n";
 
 			exit(0);

@@ -61,7 +61,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "QSV_Encoder_Internal.h"
 #include <obs-module.h>
 #include <string>
-#include <mutex>
+#include <atomic>
+#include <intrin.h>
 
 #define do_log(level, format, ...) \
 	blog(level, "[qsv encoder: '%s'] " format, \
@@ -69,7 +70,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 mfxIMPL              impl = MFX_IMPL_HARDWARE_ANY;
 mfxVersion           ver = {{0, 1}}; // for backward compatibility
-std::mutex           active_mutex;
+std::atomic<bool>    is_active{false};
 
 void qsv_encoder_version(unsigned short *major, unsigned short *minor)
 {
@@ -79,7 +80,8 @@ void qsv_encoder_version(unsigned short *major, unsigned short *minor)
 
 qsv_t *qsv_encoder_open(qsv_param_t *pParams)
 {
-	if (!active_mutex.try_lock()) {
+	bool false_value = false;
+	if (!is_active.compare_exchange_strong(false_value, true)) {
 		do_log(LOG_ERROR, "Cannot have more than one encoder "
 				"active at a time");
 		return NULL;
@@ -90,7 +92,7 @@ qsv_t *qsv_encoder_open(qsv_param_t *pParams)
 	if (sts != MFX_ERR_NONE) {
 		delete pEncoder;
 		if (pEncoder)
-			active_mutex.unlock();
+			is_active.store(false);
 		return NULL;
 	}
 
@@ -131,7 +133,7 @@ int qsv_encoder_close(qsv_t *pContext)
 	delete pEncoder;
 
 	if (pEncoder)
-		active_mutex.unlock();
+		is_active.store(false);
 
 	return 0;
 }
@@ -223,6 +225,6 @@ enum qsv_cpu_platform qsv_get_cpu_platform()
 		return QSV_CPU_PLATFORM_HSW;
 	}
 
-	//assume newer revisions are at least as capable as haswell
+	//assume newer revisions are at least as capable as Haswell
 	return QSV_CPU_PLATFORM_INTEL;
 }

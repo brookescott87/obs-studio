@@ -35,9 +35,9 @@ struct gl_data {
 	uint32_t                       cy;
 	DXGI_FORMAT                    format;
 	GLuint                         fbo;
-	bool                           using_shtex : 1;
-	bool                           using_scale : 1;
-	bool                           shmem_fallback : 1;
+	bool                           using_shtex;
+	bool                           using_scale;
+	bool                           shmem_fallback;
 
 	union {
 		/* shared texture */
@@ -872,6 +872,15 @@ bool hook_gl(void)
 	gl = get_system_module("opengl32.dll");
 	if (!gl) {
 		return false;
+	}
+
+	/* "life is feudal: your own" somehow uses both opengl and directx at
+	 * the same time, so blacklist it from capturing opengl */
+	const char *process_name = get_process_name();
+	if (_strcmpi(process_name, "yo_cm_client.exe") == 0 ||
+	    _strcmpi(process_name, "cm_client.exe")    == 0) {
+		hlog("Ignoring opengl for game: %s", process_name);
+		return true;
 	}
 
 	if (!gl_register_window()) {

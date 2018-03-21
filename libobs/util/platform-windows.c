@@ -14,16 +14,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#define PSAPI_VERSION 1
 #include <windows.h>
 #include <mmsystem.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <intrin.h>
+#include <psapi.h>
 
 #include "base.h"
 #include "platform.h"
 #include "darray.h"
 #include "dstr.h"
+#include "windows/win-registry.h"
 #include "windows/win-version.h"
 
 #include "../../deps/w32-pthreads/pthread.h"
@@ -34,8 +37,11 @@ static uint32_t winver = 0;
 
 static inline uint64_t get_clockfreq(void)
 {
-	if (!have_clockfreq)
+	if (!have_clockfreq) {
 		QueryPerformanceFrequency(&clock_freq);
+		have_clockfreq = true;
+	}
+
 	return clock_freq.QuadPart;
 }
 
@@ -47,7 +53,7 @@ static inline uint32_t get_winver(void)
 		winver = (ver.major << 16) | ver.minor;
 	}
 
-	return winver;	
+	return winver;
 }
 
 void *os_dlopen(const char *path)
@@ -549,11 +555,42 @@ int os_rename(const char *old_path, const char *new_path)
 		goto error;
 	}
 
-	code = MoveFileW(old_path_utf16, new_path_utf16) ? 0 : -1;
+	code = MoveFileExW(old_path_utf16, new_path_utf16,
+			MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
 
 error:
 	bfree(old_path_utf16);
 	bfree(new_path_utf16);
+	return code;
+}
+
+int os_safe_replace(const char *target, const char *from, const char *backup)
+{
+	wchar_t *wtarget = NULL;
+	wchar_t *wfrom = NULL;
+	wchar_t *wbackup = NULL;
+	int code = -1;
+
+	if (!target || !from)
+		return -1;
+	if (!os_utf8_to_wcs_ptr(target, 0, &wtarget))
+		return -1;
+	if (!os_utf8_to_wcs_ptr(from, 0, &wfrom))
+		goto fail;
+	if (backup && !os_utf8_to_wcs_ptr(backup, 0, &wbackup))
+		goto fail;
+
+	if (ReplaceFileW(wtarget, wfrom, wbackup, 0, NULL, NULL)) {
+		code = 0;
+	} else if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+		code = MoveFileExW(wfrom, wtarget, MOVEFILE_REPLACE_EXISTING)
+			? 0 : -1;
+	}
+
+fail:
+	bfree(wtarget);
+	bfree(wfrom);
+	bfree(wbackup);
 	return code;
 }
 
@@ -767,6 +804,32 @@ bool is_64_bit_windows(void)
 #endif
 }
 
+void get_reg_dword(HKEY hkey, LPCWSTR sub_key, LPCWSTR value_name,
+		struct reg_dword *info)
+{
+	struct reg_dword reg = {0};
+	HKEY key;
+	LSTATUS status;
+
+	status = RegOpenKeyEx(hkey, sub_key, 0, KEY_READ, &key);
+
+	if (status != ERROR_SUCCESS) {
+		info->status = status;
+		info->size = 0;
+		info->return_value = 0;
+		return;
+	}
+
+	reg.size = sizeof(reg.return_value);
+
+	reg.status = RegQueryValueExW(key, value_name, NULL, NULL,
+			(LPBYTE)&reg.return_value, &reg.size);
+
+	RegCloseKey(key);
+
+	*info = reg;
+}
+
 #define WINVER_REG_KEY L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
 
 void get_win_ver(struct win_version_info *info)
@@ -781,7 +844,7 @@ void get_win_ver(struct win_version_info *info)
 		get_dll_ver(L"kernel32", &ver);
 		got_version = true;
 
-		if (ver.major == 10 && ver.revis == 0) {
+		if (ver.major == 10) {
 			HKEY    key;
 			DWORD   size, win10_revision;
 			LSTATUS status;
@@ -796,7 +859,8 @@ void get_win_ver(struct win_version_info *info)
 			status = RegQueryValueExW(key, L"UBR", NULL, NULL,
 					(LPBYTE)&win10_revision, &size);
 			if (status == ERROR_SUCCESS)
-				ver.revis = (int)win10_revision;
+				ver.revis = (int)win10_revision > ver.revis ?
+						(int)win10_revision : ver.revis;
 
 			RegCloseKey(key);
 		}
@@ -847,4 +911,133 @@ void os_inhibit_sleep_destroy(os_inhibit_t *info)
 void os_breakpoint(void)
 {
 	__debugbreak();
+}
+
+DWORD num_logical_cores(ULONG_PTR mask)
+{
+	DWORD     left_shift    = sizeof(ULONG_PTR) * 8 - 1;
+	DWORD     bit_set_count = 0;
+	ULONG_PTR bit_test      = (ULONG_PTR)1 << left_shift;
+
+	for (DWORD i = 0; i <= left_shift; ++i) {
+		bit_set_count += ((mask & bit_test) ? 1 : 0);
+		bit_test      /= 2;
+	}
+
+	return bit_set_count;
+}
+
+static int physical_cores = 0;
+static int logical_cores = 0;
+static bool core_count_initialized = false;
+
+static void os_get_cores_internal(void)
+{
+	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION info = NULL, temp = NULL;
+	DWORD len = 0;
+
+	if (core_count_initialized)
+		return;
+
+	core_count_initialized = true;
+
+	GetLogicalProcessorInformation(info, &len);
+	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+		return;
+
+	info = malloc(len);
+
+	if (GetLogicalProcessorInformation(info, &len)) {
+		DWORD num = len / sizeof(*info);
+		temp = info;
+
+		for (DWORD i = 0; i < num; i++) {
+			if (temp->Relationship == RelationProcessorCore) {
+				ULONG_PTR mask = temp->ProcessorMask;
+
+				physical_cores++;
+				logical_cores += num_logical_cores(mask);
+			}
+
+			temp++;
+		}
+	}
+
+	free(info);
+}
+
+int os_get_physical_cores(void)
+{
+	if (!core_count_initialized)
+		os_get_cores_internal();
+	return physical_cores;
+}
+
+int os_get_logical_cores(void)
+{
+	if (!core_count_initialized)
+		os_get_cores_internal();
+	return logical_cores;
+}
+
+static inline bool os_get_sys_memory_usage_internal(MEMORYSTATUSEX *msex)
+{
+	if (!GlobalMemoryStatusEx(msex))
+		return false;
+	return true;
+}
+
+uint64_t os_get_sys_free_size(void)
+{
+	MEMORYSTATUSEX msex = {sizeof(MEMORYSTATUSEX)};
+	if (!os_get_sys_memory_usage_internal(&msex))
+		return 0;
+	return msex.ullAvailPhys;
+}
+
+static inline bool os_get_proc_memory_usage_internal(PROCESS_MEMORY_COUNTERS *pmc)
+{
+	if (!GetProcessMemoryInfo(GetCurrentProcess(), pmc, sizeof(*pmc)))
+		return false;
+	return true;
+}
+
+bool os_get_proc_memory_usage(os_proc_memory_usage_t *usage)
+{
+	PROCESS_MEMORY_COUNTERS pmc = {sizeof(PROCESS_MEMORY_COUNTERS)};
+	if (!os_get_proc_memory_usage_internal(&pmc))
+		return false;
+
+	usage->resident_size = pmc.WorkingSetSize;
+	usage->virtual_size  = pmc.PagefileUsage;
+	return true;
+}
+
+uint64_t os_get_proc_resident_size(void)
+{
+	PROCESS_MEMORY_COUNTERS pmc = {sizeof(PROCESS_MEMORY_COUNTERS)};
+	if (!os_get_proc_memory_usage_internal(&pmc))
+		return 0;
+	return pmc.WorkingSetSize;
+}
+
+uint64_t os_get_proc_virtual_size(void)
+{
+	PROCESS_MEMORY_COUNTERS pmc = {sizeof(PROCESS_MEMORY_COUNTERS)};
+	if (!os_get_proc_memory_usage_internal(&pmc))
+		return 0;
+	return pmc.PagefileUsage;
+}
+
+uint64_t os_get_free_disk_space(const char *dir)
+{
+	wchar_t *wdir = NULL;
+	if (!os_utf8_to_wcs_ptr(dir, 0, &wdir))
+		return 0;
+
+	ULARGE_INTEGER free;
+	bool success = !!GetDiskFreeSpaceExW(wdir, &free, NULL, NULL);
+	bfree(wdir);
+
+	return success ? free.QuadPart : 0;
 }

@@ -178,15 +178,17 @@ static void rtmp_stream_stop(void *data, uint64_t ts)
 		pthread_join(stream->connect_thread, NULL);
 
 	stream->stop_ts = ts / 1000ULL;
-	os_event_signal(stream->stop_event);
 
 	if (ts)
 		stream->shutdown_timeout_ts = ts +
 			(uint64_t)stream->max_shutdown_time_sec * 1000000000ULL;
 
 	if (active(stream)) {
+		os_event_signal(stream->stop_event);
 		if (stream->stop_ts == 0)
 			os_sem_post(stream->send_sem);
+	} else {
+		obs_output_signal_stop(stream->output, OBS_OUTPUT_SUCCESS);
 	}
 }
 
@@ -293,6 +295,8 @@ static void droptest_cap_data_rate(struct rtmp_stream *stream, size_t size)
 
 static int socket_queue_data(RTMPSockBuf *sb, const char *data, int len, void *arg)
 {
+	UNUSED_PARAMETER(sb);
+
 	struct rtmp_stream *stream = arg;
 
 retry_send:
@@ -345,7 +349,8 @@ static int send_packet(struct rtmp_stream *stream,
 		}
 	}
 
-	flv_packet_mux(packet, &data, &size, is_header);
+	flv_packet_mux(packet, is_header ? 0 : stream->start_dts_offset,
+			&data, &size, is_header);
 
 #ifdef TEST_FRAMEDROPS
 	droptest_cap_data_rate(stream, size);
@@ -376,6 +381,64 @@ static inline bool can_shutdown_stream(struct rtmp_stream *stream,
 				stream->max_shutdown_time_sec);
 
 	return timeout || packet->sys_dts_usec >= (int64_t)stream->stop_ts;
+}
+
+static void set_output_error(struct rtmp_stream *stream)
+{
+	const char *msg = NULL;
+#ifdef _WIN32
+	switch (stream->rtmp.last_error_code)
+	{
+	case WSAETIMEDOUT:
+		msg = obs_module_text("ConnectionTimedOut");
+		break;
+	case WSAEACCES:
+		msg = obs_module_text("PermissionDenied");
+		break;
+	case WSAECONNABORTED:
+		msg = obs_module_text("ConnectionAborted");
+		break;
+	case WSAECONNRESET:
+		msg = obs_module_text("ConnectionReset");
+		break;
+	case WSAHOST_NOT_FOUND:
+		msg = obs_module_text("HostNotFound");
+		break;
+	case WSANO_DATA:
+		msg = obs_module_text("NoData");
+		break;
+	case WSAEADDRNOTAVAIL:
+		msg = obs_module_text("AddressNotAvailable");
+		break;
+	}
+#else
+	switch (stream->rtmp.last_error_code)
+	{
+	case ETIMEDOUT:
+		msg = obs_module_text("ConnectionTimedOut");
+		break;
+	case EACCES:
+		msg = obs_module_text("PermissionDenied");
+		break;
+	case ECONNABORTED:
+		msg = obs_module_text("ConnectionAborted");
+		break;
+	case ECONNRESET:
+		msg = obs_module_text("ConnectionReset");
+		break;
+	case HOST_NOT_FOUND:
+		msg = obs_module_text("HostNotFound");
+		break;
+	case NO_DATA:
+		msg = obs_module_text("NoData");
+		break;
+	case EADDRNOTAVAIL:
+		msg = obs_module_text("AddressNotAvailable");
+		break;
+	}
+#endif
+
+	obs_output_set_last_error(stream->output, msg);
 }
 
 static void *send_thread(void *data)
@@ -428,6 +491,7 @@ static void *send_thread(void *data)
 		stream->rtmp.m_bCustomSend = false;
 	}
 
+	set_output_error(stream);
 	RTMP_Close(&stream->rtmp);
 
 	if (!stopping(stream)) {
@@ -571,8 +635,10 @@ static int init_send(struct rtmp_stream *stream)
 		int one = 1;
 #ifdef _WIN32
 		if (ioctlsocket(stream->rtmp.m_sb.sb_socket, FIONBIO, &one)) {
+			stream->rtmp.last_error_code = WSAGetLastError();
 #else
 		if (ioctl(stream->rtmp.m_sb.sb_socket, FIONBIO, &one)) {
+			stream->rtmp.last_error_code = errno;
 #endif
 			warn("Failed to set non-blocking socket");
 			return OBS_OUTPUT_ERROR;
@@ -595,6 +661,14 @@ static int init_send(struct rtmp_stream *stream)
 			obs_data_t *params = obs_encoder_get_settings(vencoder);
 			if (params) {
 				int bitrate = obs_data_get_int(params, "bitrate");
+				if (!bitrate) {
+					warn ("Video encoder didn't return a "
+						"valid bitrate, new network "
+						"code may function poorly. "
+						"Low latency mode disabled.");
+					stream->low_latency_mode = false;
+					bitrate = 10000;
+				}
 				total_bitrate += bitrate;
 				obs_data_release(params);
 			}
@@ -605,6 +679,8 @@ static int init_send(struct rtmp_stream *stream)
 			obs_data_t *params = obs_encoder_get_settings(aencoder);
 			if (params) {
 				int bitrate = obs_data_get_int(params, "bitrate");
+				if (!bitrate)
+					bitrate = 160;
 				total_bitrate += bitrate;
 				obs_data_release(params);
 			}
@@ -644,6 +720,7 @@ static int init_send(struct rtmp_stream *stream)
 		if (!send_meta_data(stream, idx++, &next)) {
 			warn("Disconnected while attempting to connect to "
 			     "server.");
+			set_output_error(stream);
 			return OBS_OUTPUT_DISCONNECTED;
 		}
 	}
@@ -718,7 +795,7 @@ static int try_connect(struct rtmp_stream *stream)
 
 	info("Connecting to RTMP URL %s...", stream->path.array);
 
-	memset(&stream->rtmp.Link, 0, sizeof(stream->rtmp.Link));
+	RTMP_Init(&stream->rtmp);
 	if (!RTMP_SetupURL(&stream->rtmp, stream->path.array))
 		return OBS_OUTPUT_BAD_PATH;
 
@@ -767,8 +844,11 @@ static int try_connect(struct rtmp_stream *stream)
 	win32_log_interface_type(stream);
 #endif
 
-	if (!RTMP_Connect(&stream->rtmp, NULL))
+	if (!RTMP_Connect(&stream->rtmp, NULL)) {
+		set_output_error(stream);
 		return OBS_OUTPUT_CONNECT_FAILED;
+	}
+
 	if (!RTMP_ConnectStream(&stream->rtmp, 0))
 		return OBS_OUTPUT_INVALID_STREAM;
 
@@ -798,8 +878,8 @@ static bool init_connect(struct rtmp_stream *stream)
 	os_atomic_set_bool(&stream->disconnected, false);
 	stream->total_bytes_sent = 0;
 	stream->dropped_frames   = 0;
-	stream->min_drop_dts_usec= 0;
 	stream->min_priority     = 0;
+	stream->got_first_video  = false;
 
 	settings = obs_output_get_settings(stream->output);
 	dstr_copy(&stream->path,     obs_service_get_url(service));
@@ -876,7 +956,6 @@ static inline bool add_packet(struct rtmp_stream *stream,
 {
 	circlebuf_push_back(&stream->packets, packet,
 			sizeof(struct encoder_packet));
-	stream->last_dts_usec = packet->dts_usec;
 	return true;
 }
 
@@ -886,10 +965,11 @@ static inline size_t num_buffered_packets(struct rtmp_stream *stream)
 }
 
 static void drop_frames(struct rtmp_stream *stream, const char *name,
-		int highest_priority, int64_t *p_min_dts_usec)
+		int highest_priority, bool pframes)
 {
+	UNUSED_PARAMETER(pframes);
+
 	struct circlebuf new_buf            = {0};
-	uint64_t         last_drop_dts_usec = 0;
 	int              num_frames_dropped = 0;
 
 #ifdef _DEBUG
@@ -903,8 +983,6 @@ static void drop_frames(struct rtmp_stream *stream, const char *name,
 	while (stream->packets.size) {
 		struct encoder_packet packet;
 		circlebuf_pop_front(&stream->packets, &packet, sizeof(packet));
-
-		last_drop_dts_usec = packet.dts_usec;
 
 		/* do not drop audio data or video keyframes */
 		if (packet.type          == OBS_ENCODER_AUDIO ||
@@ -922,8 +1000,8 @@ static void drop_frames(struct rtmp_stream *stream, const char *name,
 
 	if (stream->min_priority < highest_priority)
 		stream->min_priority = highest_priority;
-
-	*p_min_dts_usec = last_drop_dts_usec;
+	if (!num_frames_dropped)
+		return;
 
 	stream->dropped_frames += num_frames_dropped;
 #ifdef _DEBUG
@@ -934,6 +1012,23 @@ static void drop_frames(struct rtmp_stream *stream, const char *name,
 #endif
 }
 
+static bool find_first_video_packet(struct rtmp_stream *stream,
+		struct encoder_packet *first)
+{
+	size_t count = stream->packets.size / sizeof(*first);
+
+	for (size_t i = 0; i < count; i++) {
+		struct encoder_packet *cur = circlebuf_data(&stream->packets,
+				i * sizeof(*first));
+		if (cur->type == OBS_ENCODER_VIDEO && !cur->keyframe) {
+			*first = *cur;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static void check_to_drop_frames(struct rtmp_stream *stream, bool pframes)
 {
 	struct encoder_packet first;
@@ -942,9 +1037,6 @@ static void check_to_drop_frames(struct rtmp_stream *stream, bool pframes)
 	const char *name = pframes ? "p-frames" : "b-frames";
 	int priority = pframes ?
 		OBS_NAL_PRIORITY_HIGHEST : OBS_NAL_PRIORITY_HIGH;
-	int64_t *p_min_dts_usec = pframes ?
-		&stream->pframe_min_drop_dts_usec :
-		&stream->min_drop_dts_usec;
 	int64_t drop_threshold = pframes ?
 		stream->pframe_drop_threshold_usec :
 		stream->drop_threshold_usec;
@@ -955,10 +1047,7 @@ static void check_to_drop_frames(struct rtmp_stream *stream, bool pframes)
 		return;
 	}
 
-	circlebuf_peek_front(&stream->packets, &first, sizeof(first));
-
-	/* do not drop frames if frames were just dropped within this time */
-	if (first.dts_usec < *p_min_dts_usec)
+	if (!find_first_video_packet(stream, &first))
 		return;
 
 	/* if the amount of time stored in the buffered packets waiting to be
@@ -972,7 +1061,7 @@ static void check_to_drop_frames(struct rtmp_stream *stream, bool pframes)
 
 	if (buffer_duration_usec > drop_threshold) {
 		debug("buffer_duration_usec: %" PRId64, buffer_duration_usec);
-		drop_frames(stream, name, priority, p_min_dts_usec);
+		drop_frames(stream, name, priority, pframes);
 	}
 }
 
@@ -991,6 +1080,7 @@ static bool add_video_packet(struct rtmp_stream *stream,
 		stream->min_priority = 0;
 	}
 
+	stream->last_dts_usec = packet->dts_usec;
 	return add_packet(stream, packet);
 }
 
@@ -1003,10 +1093,17 @@ static void rtmp_stream_data(void *data, struct encoder_packet *packet)
 	if (disconnected(stream) || !active(stream))
 		return;
 
-	if (packet->type == OBS_ENCODER_VIDEO)
+	if (packet->type == OBS_ENCODER_VIDEO) {
+		if (!stream->got_first_video) {
+			stream->start_dts_offset =
+				get_ms_time(packet, packet->dts);
+			stream->got_first_video = true;
+		}
+
 		obs_parse_avc_packet(&new_packet, packet);
-	else
+	} else {
 		obs_encoder_packet_ref(&new_packet, packet);
+	}
 
 	pthread_mutex_lock(&stream->packets_mutex);
 
@@ -1090,21 +1187,30 @@ static float rtmp_stream_congestion(void *data)
 		return stream->min_priority > 0 ? 1.0f : stream->congestion;
 }
 
+static int rtmp_stream_connect_time(void *data)
+{
+	struct rtmp_stream *stream = data;
+	return stream->rtmp.connect_time_ms;
+}
+
 struct obs_output_info rtmp_output_info = {
-	.id                 = "rtmp_output",
-	.flags              = OBS_OUTPUT_AV |
-	                      OBS_OUTPUT_ENCODED |
-	                      OBS_OUTPUT_SERVICE |
-	                      OBS_OUTPUT_MULTI_TRACK,
-	.get_name           = rtmp_stream_getname,
-	.create             = rtmp_stream_create,
-	.destroy            = rtmp_stream_destroy,
-	.start              = rtmp_stream_start,
-	.stop               = rtmp_stream_stop,
-	.encoded_packet     = rtmp_stream_data,
-	.get_defaults       = rtmp_stream_defaults,
-	.get_properties     = rtmp_stream_properties,
-	.get_total_bytes    = rtmp_stream_total_bytes_sent,
-	.get_congestion     = rtmp_stream_congestion,
-	.get_dropped_frames = rtmp_stream_dropped_frames
+	.id                   = "rtmp_output",
+	.flags                = OBS_OUTPUT_AV |
+	                        OBS_OUTPUT_ENCODED |
+	                        OBS_OUTPUT_SERVICE |
+	                        OBS_OUTPUT_MULTI_TRACK,
+	.encoded_video_codecs = "h264",
+	.encoded_audio_codecs = "aac",
+	.get_name             = rtmp_stream_getname,
+	.create               = rtmp_stream_create,
+	.destroy              = rtmp_stream_destroy,
+	.start                = rtmp_stream_start,
+	.stop                 = rtmp_stream_stop,
+	.encoded_packet       = rtmp_stream_data,
+	.get_defaults         = rtmp_stream_defaults,
+	.get_properties       = rtmp_stream_properties,
+	.get_total_bytes      = rtmp_stream_total_bytes_sent,
+	.get_congestion       = rtmp_stream_congestion,
+	.get_connect_time_ms  = rtmp_stream_connect_time,
+	.get_dropped_frames   = rtmp_stream_dropped_frames
 };

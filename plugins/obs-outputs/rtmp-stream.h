@@ -51,6 +51,9 @@ struct rtmp_stream {
 	struct circlebuf packets;
 	bool             sent_headers;
 
+	bool             got_first_video;
+	int64_t          start_dts_offset;
+
 	volatile bool    connecting;
 	pthread_t        connect_thread;
 
@@ -72,9 +75,7 @@ struct rtmp_stream {
 
 	/* frame drop variables */
 	int64_t          drop_threshold_usec;
-	int64_t          min_drop_dts_usec;
 	int64_t          pframe_drop_threshold_usec;
-	int64_t          pframe_min_drop_dts_usec;
 	int              min_priority;
 	float            congestion;
 

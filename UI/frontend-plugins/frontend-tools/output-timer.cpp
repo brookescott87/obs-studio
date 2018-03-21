@@ -22,6 +22,8 @@ OutputTimer::OutputTimer(QWidget *parent)
 		SLOT(StreamingTimerButton()));
 	QObject::connect(ui->outputTimerRecord, SIGNAL(clicked()), this,
 		SLOT(RecordingTimerButton()));
+	QObject::connect(ui->buttonBox->button(QDialogButtonBox::Close),
+		SIGNAL(clicked()), this, SLOT(hide()));
 
 	streamingTimer = new QTimer(this);
 	streamingTimerDisplay = new QTimer(this);
@@ -38,11 +40,13 @@ void OutputTimer::closeEvent(QCloseEvent*)
 void OutputTimer::StreamingTimerButton()
 {
 	if (!obs_frontend_streaming_active()) {
+		blog(LOG_INFO, "Starting stream due to OutputTimer");
 		obs_frontend_streaming_start();
 	} else if (streamingAlreadyActive) {
 		StreamTimerStart();
 		streamingAlreadyActive = false;
 	} else if (obs_frontend_streaming_active()) {
+		blog(LOG_INFO, "Stopping stream due to OutputTimer");
 		obs_frontend_streaming_stop();
 	}
 }
@@ -50,11 +54,13 @@ void OutputTimer::StreamingTimerButton()
 void OutputTimer::RecordingTimerButton()
 {
 	if (!obs_frontend_recording_active()) {
+		blog(LOG_INFO, "Starting recording due to OutputTimer");
 		obs_frontend_recording_start();
 	} else if (recordingAlreadyActive) {
 		RecordTimerStart();
 		recordingAlreadyActive = false;
 	} else if (obs_frontend_recording_active()) {
+		blog(LOG_INFO, "Stopping recording due to OutputTimer");
 		obs_frontend_recording_stop();
 	}
 }
@@ -202,11 +208,13 @@ void OutputTimer::ShowHideDialog()
 
 void OutputTimer::EventStopStreaming()
 {
+	blog(LOG_INFO, "Stopping stream due to OutputTimer timeout");
 	obs_frontend_streaming_stop();
 }
 
 void OutputTimer::EventStopRecording()
 {
+	blog(LOG_INFO, "Stopping recording due to OutputTimer timeout");
 	obs_frontend_recording_stop();
 }
 

@@ -212,8 +212,15 @@ static void config_parse_section(struct config_section *section,
 		strref_clear(&value);
 		config_parse_string(lex, &value, 0);
 
-		if (!strref_is_empty(&value))
+		if (strref_is_empty(&value)) {
+			struct config_item item;
+			item.name  = bstrdup_n(name.array, name.len);
+			item.value = bzalloc(1);
+			darray_push_back(sizeof(struct config_item),
+					&section->items, &item);
+		} else {
 			config_add_item(&section->items, &name, &value);
+		}
 	}
 }
 
@@ -445,14 +452,10 @@ int config_save_safe(config_t *config, const char *temp_ext,
 		if (*backup_ext != '.')
 			dstr_cat(&backup_file, ".");
 		dstr_cat(&backup_file, backup_ext);
-
-		os_unlink(backup_file.array);
-		os_rename(file, backup_file.array);
-	} else {
-		os_unlink(file);
 	}
 
-	os_rename(temp_file.array, file);
+	if (os_safe_replace(file, temp_file.array, backup_file.array) != 0)
+		ret = CONFIG_ERROR;
 
 cleanup:
 	pthread_mutex_unlock(&config->mutex);

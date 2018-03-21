@@ -49,7 +49,7 @@
 #define TEXT_MODE                obs_module_text("Mode")
 #define TEXT_GAME_CAPTURE        obs_module_text("GameCapture")
 #define TEXT_ANY_FULLSCREEN      obs_module_text("GameCapture.AnyFullscreen")
-#define TEXT_SLI_COMPATIBILITY   obs_module_text("Compatibility")
+#define TEXT_SLI_COMPATIBILITY   obs_module_text("SLIFix")
 #define TEXT_ALLOW_TRANSPARENCY  obs_module_text("AllowTransparency")
 #define TEXT_FORCE_SCALING       obs_module_text("GameCapture.ForceScaling")
 #define TEXT_SCALE_RES           obs_module_text("GameCapture.ScaleRes")
@@ -87,13 +87,13 @@ struct game_capture_config {
 	enum capture_mode             mode;
 	uint32_t                      scale_cx;
 	uint32_t                      scale_cy;
-	bool                          cursor : 1;
-	bool                          force_shmem : 1;
-	bool                          force_scaling : 1;
-	bool                          allow_transparency : 1;
-	bool                          limit_framerate : 1;
-	bool                          capture_overlays : 1;
-	bool                          anticheat_hook : 1;
+	bool                          cursor;
+	bool                          force_shmem;
+	bool                          force_scaling;
+	bool                          allow_transparency;
+	bool                          limit_framerate;
+	bool                          capture_overlays;
+	bool                          anticheat_hook;
 };
 
 struct game_capture {
@@ -119,17 +119,18 @@ struct game_capture {
 	volatile long                 hotkey_window;
 	volatile bool                 deactivate_hook;
 	volatile bool                 activate_hook_now;
-	bool                          wait_for_target_startup : 1;
-	bool                          showing : 1;
-	bool                          active : 1;
-	bool                          capturing : 1;
-	bool                          activate_hook : 1;
-	bool                          process_is_64bit : 1;
-	bool                          error_acquiring : 1;
-	bool                          dwm_capture : 1;
-	bool                          initial_config : 1;
-	bool                          convert_16bit : 1;
-	bool                          is_app : 1;
+	bool                          wait_for_target_startup;
+	bool                          showing;
+	bool                          active;
+	bool                          capturing;
+	bool                          activate_hook;
+	bool                          process_is_64bit;
+	bool                          error_acquiring;
+	bool                          dwm_capture;
+	bool                          initial_config;
+	bool                          convert_16bit;
+	bool                          is_app;
+	bool                          cursor_hidden;
 
 	struct game_capture_config    config;
 
@@ -148,6 +149,7 @@ struct game_capture {
 	HANDLE                        texture_mutexes[2];
 	wchar_t                       *app_sid;
 	int                           retrying;
+	float                         cursor_check_time;
 
 	union {
 		struct {
@@ -454,7 +456,7 @@ static bool hotkey_start(void *data, obs_hotkey_pair_id id,
 	if (pressed && gc->config.mode == CAPTURE_MODE_HOTKEY) {
 		info("Activate hotkey pressed");
 		os_atomic_set_long(&gc->hotkey_window,
-				(long)GetForegroundWindow());
+				(long)(uintptr_t)GetForegroundWindow());
 		os_atomic_set_bool(&gc->deactivate_hook, true);
 		os_atomic_set_bool(&gc->activate_hook_now, true);
 	}
@@ -620,7 +622,7 @@ static inline bool is_64bit_process(HANDLE process)
 static inline bool open_target_process(struct game_capture *gc)
 {
 	gc->target_process = open_process(
-			PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+			PROCESS_QUERY_INFORMATION | SYNCHRONIZE,
 			false, gc->process_id);
 	if (!gc->target_process) {
 		warn("could not open process: %s", gc->config.executable);
@@ -723,6 +725,11 @@ static inline bool init_hook_info(struct game_capture *gc)
 		return false;
 	}
 
+	if (gc->config.force_shmem) {
+		warn("init_hook_info: user is forcing shared memory "
+			"(compatibility mode)");
+	}
+
 	gc->global_hook_info->offsets = gc->process_is_64bit ?
 		offsets64 : offsets32;
 	gc->global_hook_info->capture_overlay = gc->config.capture_overlays;
@@ -735,13 +742,10 @@ static inline bool init_hook_info(struct game_capture *gc)
 	reset_frame_interval(gc);
 
 	obs_enter_graphics();
-	if (!gs_shared_texture_available())
+	if (!gs_shared_texture_available()) {
+		warn("init_hook_info: shared texture capture unavailable");
 		gc->global_hook_info->force_shmem = true;
-	obs_leave_graphics();
-
-	obs_enter_graphics();
-	if (!gs_shared_texture_available())
-		gc->global_hook_info->force_shmem = true;
+	}
 	obs_leave_graphics();
 
 	return true;
@@ -1425,11 +1429,16 @@ static inline void copy_16bit_tex(struct game_capture *gc, int cur_texture,
 
 static void copy_shmem_tex(struct game_capture *gc)
 {
-	int cur_texture = gc->shmem_data->last_tex;
+	int cur_texture;
 	HANDLE mutex = NULL;
 	uint32_t pitch;
 	int next_texture;
 	uint8_t *data;
+
+	if (!gc->shmem_data)
+		return;
+
+	cur_texture = gc->shmem_data->last_tex;
 
 	if (cur_texture < 0 || cur_texture > 1)
 		return;
@@ -1546,8 +1555,24 @@ static inline bool capture_valid(struct game_capture *gc)
 {
 	if (!gc->dwm_capture && !IsWindow(gc->window))
 	       return false;
-	
+
 	return !object_signalled(gc->target_process);
+}
+
+static void check_foreground_window(struct game_capture *gc, float seconds)
+{
+	// Hides the cursor if the user isn't actively in the game
+	gc->cursor_check_time += seconds;
+	if (gc->cursor_check_time >= 0.1f) {
+		DWORD foreground_process_id;
+		GetWindowThreadProcessId(GetForegroundWindow(),
+			&foreground_process_id);
+		if (gc->process_id != foreground_process_id)
+			gc->cursor_hidden = true;
+		else
+			gc->cursor_hidden = false;
+		gc->cursor_check_time = 0.0f;
+	}
 }
 
 static void game_capture_tick(void *data, float seconds)
@@ -1557,7 +1582,8 @@ static void game_capture_tick(void *data, float seconds)
 	bool activate_now = os_atomic_set_bool(&gc->activate_hook_now, false);
 
 	if (activate_now) {
-		HWND hwnd = (HWND)os_atomic_load_long(&gc->hotkey_window);
+		HWND hwnd = (HWND)(uintptr_t)os_atomic_load_long(
+				&gc->hotkey_window);
 
 		if (is_uwp_window(hwnd))
 			hwnd = get_uwp_actual_window(hwnd);
@@ -1656,6 +1682,7 @@ static void game_capture_tick(void *data, float seconds)
 			}
 
 			if (gc->config.cursor) {
+				check_foreground_window(gc, seconds);
 				obs_enter_graphics();
 				cursor_capture(&gc->cursor_data);
 				obs_leave_graphics();
@@ -1711,12 +1738,14 @@ static void game_capture_render(void *data, gs_effect_t *effect)
 		obs_source_draw(gc->texture, 0, 0, 0, 0,
 				gc->global_hook_info->flip);
 
-		if (gc->config.allow_transparency && gc->config.cursor) {
+		if (gc->config.allow_transparency && gc->config.cursor &&
+			!gc->cursor_hidden) {
 			game_capture_render_cursor(gc);
 		}
 	}
 
-	if (!gc->config.allow_transparency && gc->config.cursor) {
+	if (!gc->config.allow_transparency && gc->config.cursor &&
+		!gc->cursor_hidden) {
 		effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 
 		while (gs_effect_loop(effect, "Draw")) {

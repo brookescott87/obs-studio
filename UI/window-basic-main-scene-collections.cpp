@@ -114,13 +114,13 @@ static bool GetSceneCollectionName(QWidget *parent, std::string &name,
 			return false;
 		}
 		if (name.empty()) {
-			QMessageBox::information(parent,
+			OBSMessageBox::information(parent,
 					QTStr("NoNameEntered.Title"),
 					QTStr("NoNameEntered.Text"));
 			continue;
 		}
 		if (SceneCollectionExists(name.c_str())) {
-			QMessageBox::information(parent,
+			OBSMessageBox::information(parent,
 					QTStr("NameExists.Title"),
 					QTStr("NameExists.Text"));
 			continue;
@@ -221,10 +221,26 @@ void OBSBasic::RefreshSceneCollections()
 
 	EnumSceneCollections(addCollection);
 
+	/* force saving of first scene collection on first run, otherwise
+	 * no scene collections will show up */
+	if (!count) {
+		long prevDisableVal = disableSaving;
+
+		disableSaving = 0;
+		SaveProjectNow();
+		disableSaving = prevDisableVal;
+
+		EnumSceneCollections(addCollection);
+	}
+
 	ui->actionRemoveSceneCollection->setEnabled(count > 1);
 
 	OBSBasic *main = reinterpret_cast<OBSBasic*>(App()->GetMainWindow());
+
 	main->OpenSavedProjectors();
+	main->ui->actionPasteFilters->setEnabled(false);
+	main->ui->actionPasteRef->setEnabled(false);
+	main->ui->actionPasteDup->setEnabled(false);
 }
 
 void OBSBasic::on_actionNewSceneCollection_triggered()
@@ -314,7 +330,7 @@ void OBSBasic::on_actionRemoveSceneCollection_triggered()
 	QString text = QTStr("ConfirmRemove.Text");
 	text.replace("$1", QT_UTF8(oldName.c_str()));
 
-	QMessageBox::StandardButton button = QMessageBox::question(this,
+	QMessageBox::StandardButton button = OBSMessageBox::question(this,
 			QTStr("ConfirmRemove.Title"), text);
 	if (button == QMessageBox::No)
 		return;
@@ -356,7 +372,7 @@ void OBSBasic::on_actionImportSceneCollection_triggered()
 {
 	char path[512];
 
-	QString home = QDir::homePath();
+	QString qhome = QDir::homePath();
 
 	int ret = GetConfigPath(path, 512, "obs-studio/basic/scenes/");
 	if (ret <= 0) {
@@ -364,25 +380,53 @@ void OBSBasic::on_actionImportSceneCollection_triggered()
 		return;
 	}
 
-	QString file = QFileDialog::getOpenFileName(
+	QString qfilePath = QFileDialog::getOpenFileName(
 			this,
 			QTStr("Basic.MainMenu.SceneCollection.Import"),
-			home,
+			qhome,
 			"JSON Files (*.json)");
 
-	QFileInfo finfo(file);
-	QString filename = finfo.fileName();
-	QFileInfo destinfo(path + filename);
+	QFileInfo finfo(qfilePath);
+	QString qfilename = finfo.fileName();
+	QString qpath = QT_UTF8(path);
+	QFileInfo destinfo(QT_UTF8(path) + qfilename);
 
-	if (!file.isEmpty() && !file.isNull()) {
-		 if (!destinfo.exists()) {
-			QFile::copy(file, path + filename);
-			RefreshSceneCollections();
-		} else {
-			QMessageBox::information(this,
-				QTStr("Basic.MainMenu.SceneCollection.Import"),
-				QTStr("Basic.MainMenu.SceneCollection.Exists"));
+	if (!qfilePath.isEmpty() && !qfilePath.isNull()) {
+		string absPath = QT_TO_UTF8(finfo.absoluteFilePath());
+		OBSData scenedata =
+			obs_data_create_from_json_file(absPath.c_str());
+		obs_data_release(scenedata);
+
+		string origName = obs_data_get_string(scenedata, "name");
+		string name = origName;
+		string file;
+		int inc = 1;
+
+		while (SceneCollectionExists(name.c_str())) {
+			name = origName + " (" + to_string(++inc) + ")";
 		}
+
+		obs_data_set_string(scenedata, "name", name.c_str());
+
+		if (!GetFileSafeName(name.c_str(), file)) {
+			blog(LOG_WARNING, "Failed to create "
+					"safe file name for '%s'",
+					name.c_str());
+			return;
+		}
+
+		string filePath = path + file;
+
+		if (!GetClosestUnusedFileName(filePath, "json")) {
+			blog(LOG_WARNING, "Failed to get "
+					"closest file name for %s",
+					file.c_str());
+			return;
+		}
+
+		obs_data_save_json_safe(scenedata, filePath.c_str(),
+				"tmp", "bak");
+		RefreshSceneCollections();
 	}
 }
 
@@ -409,8 +453,12 @@ void OBSBasic::on_actionExportSceneCollection_triggered()
 
 	string file = QT_TO_UTF8(exportFile);
 
-	if (!exportFile.isEmpty() && !exportFile.isNull())
+	if (!exportFile.isEmpty() && !exportFile.isNull()) {
+		if (QFile::exists(exportFile))
+			QFile::remove(exportFile);
+
 		QFile::copy(path + currentFile + ".json", exportFile);
+	}
 }
 
 void OBSBasic::ChangeSceneCollection()

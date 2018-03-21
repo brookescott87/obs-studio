@@ -1,20 +1,18 @@
-/******************************************************************************
- Copyright (C) 2017 Hugh Bailey <obs.jim@gmail.com>
-
- This program is free software; you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation; either version 2 of the License, or
- (at your option) any later version.
-
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
-
- You should have received a copy of the GNU General Public License
- along with this program; if not, write to the Free Software
- Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA.
-******************************************************************************/
+/*
+ * Copyright (c) 2017-2018 Hugh Bailey <obs.jim@gmail.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
 
 #include "updater.hpp"
 
@@ -59,50 +57,48 @@ void FreeWinHttpHandle(HINTERNET handle)
 
 /* ----------------------------------------------------------------------- */
 
-// http://www.codeproject.com/Articles/320748/Haephrati-Elevating-during-runtime
-static bool IsAppRunningAsAdminMode()
+static inline bool is_64bit_windows(void);
+
+static inline bool HasVS2017Redist2()
 {
-	BOOL  fIsRunAsAdmin        = FALSE;
-	DWORD dwError              = ERROR_SUCCESS;
-	PSID  pAdministratorsGroup = nullptr;
+	wchar_t base[MAX_PATH];
+	wchar_t path[MAX_PATH];
+	WIN32_FIND_DATAW wfd;
+	HANDLE handle;
+	int folder = (is32bit && is_64bit_windows())
+		? CSIDL_SYSTEMX86
+		: CSIDL_SYSTEM;
 
-	/* Allocate and initialize a SID of the administrators group. */
-	SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
-	if (!AllocateAndInitializeSid(&NtAuthority,
-	                              2,
-	                              SECURITY_BUILTIN_DOMAIN_RID,
-	                              DOMAIN_ALIAS_RID_ADMINS,
-	                              0,
-	                              0,
-	                              0,
-	                              0,
-	                              0,
-	                              0,
-	                              &pAdministratorsGroup)) {
-		dwError = GetLastError();
-		goto Cleanup;
-	}
+	SHGetFolderPathW(NULL, folder, NULL, SHGFP_TYPE_CURRENT, base);
 
-	/* Determine whether the SID of administrators group is enabled in the
-	 * primary access token of the process. */
-	if (!CheckTokenMembership(nullptr, pAdministratorsGroup,
-				&fIsRunAsAdmin)) {
-		dwError = GetLastError();
-		goto Cleanup;
-	}
-
-Cleanup:
-	/* Centralized cleanup for all allocated resources. */
-	if (pAdministratorsGroup) {
-		FreeSid(pAdministratorsGroup);
-		pAdministratorsGroup = nullptr;
-	}
-
-	/* Throw the error if something failed in the function. */
-	if (ERROR_SUCCESS != dwError)
+	StringCbCopyW(path, sizeof(path), base);
+	StringCbCatW(path, sizeof(path), L"\\msvcp140.dll");
+	handle = FindFirstFileW(path, &wfd);
+	if (handle == INVALID_HANDLE_VALUE) {
 		return false;
+	} else {
+		FindClose(handle);
+	}
 
-	return !!fIsRunAsAdmin;
+	StringCbCopyW(path, sizeof(path), base);
+	StringCbCatW(path, sizeof(path), L"\\vcruntime140.dll");
+	handle = FindFirstFileW(path, &wfd);
+	if (handle == INVALID_HANDLE_VALUE) {
+		return false;
+	} else {
+		FindClose(handle);
+	}
+
+	return true;
+}
+
+static bool HasVS2017Redist()
+{
+	PVOID old = nullptr;
+	bool redirect = !!Wow64DisableWow64FsRedirection(&old);
+	bool success = HasVS2017Redist2();
+	if (redirect) Wow64RevertWow64FsRedirection(old);
+	return success;
 }
 
 static void Status(const wchar_t *fmt, ...)
@@ -238,6 +234,7 @@ enum state_t {
 	STATE_PENDING_DOWNLOAD,
 	STATE_DOWNLOADING,
 	STATE_DOWNLOADED,
+	STATE_INSTALL_FAILED,
 	STATE_INSTALLED,
 };
 
@@ -296,7 +293,8 @@ struct update_t {
 
 	void CleanPartialUpdate()
 	{
-		if (state == STATE_INSTALLED) {
+		if (state == STATE_INSTALL_FAILED ||
+			state == STATE_INSTALLED) {
 			if (!previousFile.empty()) {
 				DeleteFile(outputPath.c_str());
 				MyCopyFile(previousFile.c_str(),
@@ -342,6 +340,8 @@ static inline void CleanupPartialUpdates()
 
 bool DownloadWorkerThread()
 {
+	const DWORD tlsProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+
 	HttpHandle hSession = WinHttpOpen(L"OBS Studio Updater/2.1",
 	                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
 	                                  WINHTTP_NO_PROXY_NAME,
@@ -352,6 +352,9 @@ bool DownloadWorkerThread()
 		Status(L"Update failed: Couldn't open obsproject.com");
 		return false;
 	}
+
+	WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
+		(LPVOID)&tlsProtocols, sizeof(tlsProtocols));
 
 	HttpHandle hConnect = WinHttpConnect(hSession, L"obsproject.com",
 			INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -580,6 +583,32 @@ static bool NonCorePackageInstalled(const char *name)
 	return false;
 }
 
+static inline bool is_64bit_windows(void)
+{
+#ifdef _WIN64
+	return true;
+#else
+	BOOL x86 = false;
+	bool success = !!IsWow64Process(GetCurrentProcess(), &x86);
+	return success && !!x86;
+#endif
+}
+
+static inline bool is_64bit_file(const char *file)
+{
+	if (!file)
+		return false;
+
+	return strstr(file, "64bit") != nullptr ||
+	       strstr(file, "64.dll") != nullptr ||
+	       strstr(file, "64.exe") != nullptr;
+}
+
+static inline bool has_str(const char *file, const char *str)
+{
+	return (file && str) ? (strstr(file, str) != nullptr) : false;
+}
+
 #define UTF8ToWideBuf(wide, utf8) UTF8ToWide(wide, _countof(wide), utf8)
 #define WideToUTF8Buf(utf8, wide) WideToUTF8(utf8, _countof(utf8), wide)
 
@@ -591,6 +620,8 @@ static bool AddPackageUpdateFiles(json_t *root, size_t idx,
 	json_t *package = json_array_get(root, idx);
 	json_t *name    = json_object_get(package, "name");
 	json_t *files   = json_object_get(package, "files");
+
+	bool isWin64 = is_64bit_windows();
 
 	if (!json_is_array(files))
 		return true;
@@ -626,6 +657,15 @@ static bool AddPackageUpdateFiles(json_t *root, size_t idx,
 		int fileSize         = (int)json_integer_value(size);
 
 		if (strlen(hashUTF8) != BLAKE2_HASH_LENGTH * 2)
+			continue;
+
+		if (!isWin64 && is_64bit_file(fileUTF8))
+			continue;
+
+		/* ignore update files of opposite arch to reduce download */
+
+		if (( is32bit && has_str(fileUTF8, "/64bit/")) ||
+		    (!is32bit && has_str(fileUTF8, "/32bit/")))
 			continue;
 
 		/* convert strings to wide */
@@ -797,6 +837,8 @@ static bool UpdateFile(update_t &file)
 			return false;
 		}
 
+		file.previousFile = oldFileRenamedPath;
+
 		int  error_code;
 		bool installed_ok;
 
@@ -813,6 +855,8 @@ static bool UpdateFile(update_t &file)
 					Status(L"Update failed: Couldn't "
 					       L"verify integrity of patched %s",
 					       curFileName);
+
+					file.state = STATE_INSTALL_FAILED;
 					return false;
 				}
 
@@ -822,6 +866,8 @@ static bool UpdateFile(update_t &file)
 					       L"check of patched "
 					       L"%s failed",
 					       curFileName);
+
+					file.state = STATE_INSTALL_FAILED;
 					return false;
 				}
 			}
@@ -846,11 +892,12 @@ static bool UpdateFile(update_t &file)
 				       L"(error %d)",
 				       curFileName,
 				       GetLastError());
+
+			file.state = STATE_INSTALL_FAILED;
 			return false;
 		}
 
-		file.previousFile = oldFileRenamedPath;
-		file.state        = STATE_INSTALLED;
+		file.state = STATE_INSTALLED;
 	} else {
 		if (file.patchable) {
 			/* Uh oh, we thought we could patch something but it's
@@ -864,6 +911,8 @@ static bool UpdateFile(update_t &file)
 		 * make sure they exist */
 		CreateFoldersForPath(file.outputPath.c_str());
 
+		file.previousFile = L"";
+
 		bool success = !!MyCopyFile(
 				file.tempPath.c_str(),
 				file.outputPath.c_str());
@@ -871,11 +920,11 @@ static bool UpdateFile(update_t &file)
 			Status(L"Update failed: Couldn't install %s (error %d)",
 					file.outputPath.c_str(),
 					GetLastError());
+			file.state = STATE_INSTALL_FAILED;
 			return false;
 		}
 
-		file.previousFile = L"";
-		file.state        = STATE_INSTALLED;
+		file.state = STATE_INSTALLED;
 	}
 
 	return true;
@@ -887,6 +936,156 @@ static wchar_t tempPath[MAX_PATH] = {};
 	L"https://obsproject.com/update_studio/getpatchmanifest"
 #define HASH_NULL \
 	L"0000000000000000000000000000000000000000"
+
+static bool UpdateVS2017Redists(json_t *root)
+{
+	/* ------------------------------------------ *
+	 * Initialize session                         */
+
+	const DWORD tlsProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+
+	HttpHandle hSession = WinHttpOpen(L"OBS Studio Updater/2.1",
+	                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+	                                  WINHTTP_NO_PROXY_NAME,
+	                                  WINHTTP_NO_PROXY_BYPASS,
+	                                  0);
+	if (!hSession) {
+		Status(L"Update failed: Couldn't open obsproject.com");
+		return false;
+	}
+
+	WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
+		(LPVOID)&tlsProtocols, sizeof(tlsProtocols));
+
+	HttpHandle hConnect = WinHttpConnect(hSession, L"obsproject.com",
+			INTERNET_DEFAULT_HTTPS_PORT, 0);
+	if (!hConnect) {
+		Status(L"Update failed: Couldn't connect to obsproject.com");
+		return false;
+	}
+
+	int responseCode;
+
+	DWORD waitResult = WaitForSingleObject(cancelRequested, 0);
+	if (waitResult == WAIT_OBJECT_0) {
+		return false;
+	}
+
+	/* ------------------------------------------ *
+	 * Download redist                            */
+
+	Status(L"Downloading %s", L"Visual C++ 2017 Redistributable");
+
+	const wchar_t *file = (is32bit)
+		? L"vc2017redist_x86.exe"
+		: L"vc2017redist_x64.exe";
+
+	wstring sourceURL;
+	sourceURL += L"https://obsproject.com/downloads/";
+	sourceURL += file;
+
+	wstring destPath;
+	destPath += tempPath;
+	destPath += L"\\";
+	destPath += file;
+
+	if (!HTTPGetFile(hConnect,
+			 sourceURL.c_str(),
+			 destPath.c_str(),
+			 L"Accept-Encoding: gzip",
+			 &responseCode)) {
+
+		DeleteFile(destPath.c_str());
+		Status(L"Update failed: Could not download "
+		       L"%s (error code %d)",
+		       L"Visual C++ 2017 Redistributable",
+		       responseCode);
+		return false;
+	}
+
+	/* ------------------------------------------ *
+	 * Get expected hash                          */
+
+	json_t *redistJson = json_object_get(root, is32bit
+			? "vc2017_redist_x86"
+			: "vc2017_redist_x64");
+	if (!redistJson) {
+		Status(L"Update failed: Could not parse VC2017 redist json");
+		return false;
+	}
+
+	const char *expectedHashUTF8 = json_string_value(redistJson);
+	wchar_t expectedHashWide[BLAKE2_HASH_STR_LENGTH];
+	BYTE expectedHash[BLAKE2_HASH_LENGTH];
+
+	if (!UTF8ToWideBuf(expectedHashWide, expectedHashUTF8)) {
+		DeleteFile(destPath.c_str());
+		Status(L"Update failed: Couldn't convert Json for redist hash");
+		return false;
+	}
+
+	StringToHash(expectedHashWide, expectedHash);
+
+	wchar_t downloadHashWide[BLAKE2_HASH_STR_LENGTH];
+	BYTE downloadHash[BLAKE2_HASH_LENGTH];
+
+	/* ------------------------------------------ *
+	 * Get download hash                          */
+
+	if (!CalculateFileHash(destPath.c_str(), downloadHash)) {
+		DeleteFile(destPath.c_str());
+		Status(L"Update failed: Couldn't verify integrity of %s",
+				L"Visual C++ 2017 Redistributable");
+		return false;
+	}
+
+	/* ------------------------------------------ *
+	 * If hashes do not match, integrity failed   */
+
+	HashToString(downloadHash, downloadHashWide);
+	if (wcscmp(expectedHashWide, downloadHashWide) != 0) {
+		DeleteFile(destPath.c_str());
+		Status(L"Update failed: Couldn't verify integrity of %s",
+				L"Visual C++ 2017 Redistributable");
+		return false;
+	}
+
+	/* ------------------------------------------ *
+	 * If hashes match, install redist            */
+
+	wchar_t commandline[MAX_PATH + MAX_PATH];
+	StringCbPrintf(commandline, sizeof(commandline),
+			L"%s /install /quiet /norestart", destPath.c_str());
+
+	PROCESS_INFORMATION pi = {};
+	STARTUPINFO si = {};
+	si.cb = sizeof(si);
+
+	bool success = !!CreateProcessW(destPath.c_str(), commandline,
+			nullptr, nullptr, false, CREATE_NO_WINDOW,
+			nullptr, nullptr, &si, &pi);
+	if (success) {
+		Status(L"Installing %s...", L"Visual C++ 2017 Redistributable");
+
+		CloseHandle(pi.hThread);
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		CloseHandle(pi.hProcess);
+	} else {
+		Status(L"Update failed: Could not execute "
+		       L"%s (error code %d)",
+		       L"Visual C++ 2017 Redistributable",
+		       (int)GetLastError());
+	}
+
+	DeleteFile(destPath.c_str());
+
+	waitResult = WaitForSingleObject(cancelRequested, 0);
+	if (waitResult == WAIT_OBJECT_0) {
+		return false;
+	}
+
+	return success;
+}
 
 static bool Update(wchar_t *cmdLine)
 {
@@ -972,9 +1171,10 @@ static bool Update(wchar_t *cmdLine)
 		}
 
 		StringCbCopy(lpAppDataPath, sizeof(lpAppDataPath), pOut);
-		StringCbCat(lpAppDataPath, sizeof(lpAppDataPath),
-				L"\\obs-studio");
 	}
+
+	StringCbCat(lpAppDataPath, sizeof(lpAppDataPath),
+			L"\\obs-studio");
 
 	/* ------------------------------------- *
 	 * Get download path                     */
@@ -987,18 +1187,18 @@ static bool Update(wchar_t *cmdLine)
 
 	StringCbPrintf(manifestPath, sizeof(manifestPath),
 			L"%s\\updates\\manifest.json", lpAppDataPath);
-	if (!GetTempPathW(_countof(tempPath), tempPath)) {
+	if (!GetTempPathW(_countof(tempDirName), tempDirName)) {
 		Status(L"Update failed: Failed to get temp path: %ld",
 				GetLastError());
 		return false;
 	}
-	if (!GetTempFileNameW(tempDirName, L"obs-studio", 0, tempDirName)) {
+	if (!GetTempFileNameW(tempDirName, L"obs-studio", 0, tempPath)) {
 		Status(L"Update failed: Failed to create temp dir name: %ld",
 				GetLastError());
 		return false;
 	}
 
-	StringCbCat(tempPath, sizeof(tempPath), tempDirName);
+	DeleteFile(tempPath);
 	CreateDirectory(tempPath, nullptr);
 
 	/* ------------------------------------- *
@@ -1049,6 +1249,15 @@ static bool Update(wchar_t *cmdLine)
 	}
 
 	/* ------------------------------------- *
+	 * Check for VS2017 redistributables     */
+
+	if (!HasVS2017Redist()) {
+		if (!UpdateVS2017Redists(root)) {
+			return false;
+		}
+	}
+
+	/* ------------------------------------- *
 	 * Generate file hash json               */
 
 	Json files(json_array());
@@ -1086,7 +1295,8 @@ static bool Update(wchar_t *cmdLine)
 	 * Send file hashes                      */
 
 	string newManifest;
-	{
+
+	if (json_array_size(files) > 0) {
 		char *post_body = json_dumps(files, JSON_COMPACT);
 
 		int    responseCode;
@@ -1117,6 +1327,8 @@ static bool Update(wchar_t *cmdLine)
 					responseCode);
 			return false;
 		}
+	} else {
+		newManifest = "[]";
 	}
 
 	/* ------------------------------------- *
@@ -1173,7 +1385,7 @@ static bool Update(wchar_t *cmdLine)
 	if (!RunDownloadWorkers(2))
 		return false;
 
-	if (completedUpdates != updates.size()) {
+	if ((size_t)completedUpdates != updates.size()) {
 		Status(L"Update failed to download all files.");
 		return false;
 	}
@@ -1181,9 +1393,25 @@ static bool Update(wchar_t *cmdLine)
 	/* ------------------------------------- *
 	 * Install updates                       */
 
+	int updatesInstalled = 0;
+	int lastPosition = 0;
+
+	SendDlgItemMessage(hwndMain, IDC_PROGRESS,
+		PBM_SETPOS, 0, 0);
+
 	for (update_t &update : updates) {
-		if (!UpdateFile(update))
+		if (!UpdateFile(update)) {
 			return false;
+		} else {
+			updatesInstalled++;
+			int position = (int)(((float)updatesInstalled /
+				(float)completedUpdates) * 100.0f);
+			if (position > lastPosition) {
+				lastPosition = position;
+				SendDlgItemMessage(hwndMain, IDC_PROGRESS,
+					PBM_SETPOS, position, 0);
+			}
+		}
 	}
 
 	/* If we get here, all updates installed successfully so we can purge
@@ -1196,6 +1424,9 @@ static bool Update(wchar_t *cmdLine)
 		if (!update.tempPath.empty())
 			DeleteFile(update.tempPath.c_str());
 	}
+
+	SendDlgItemMessage(hwndMain, IDC_PROGRESS,
+		PBM_SETPOS, 100, 0);
 
 	Status(L"Update complete.");
 	SetDlgItemText(hwndMain, IDC_BUTTON, L"Launch OBS");
@@ -1366,11 +1597,28 @@ static void RestartAsAdmin(LPWSTR lpCmdLine)
 	}
 }
 
+static bool HasElevation()
+{
+	SID_IDENTIFIER_AUTHORITY sia = SECURITY_NT_AUTHORITY;
+	PSID sid = nullptr;
+	BOOL elevated = false;
+	BOOL success;
+
+	success = AllocateAndInitializeSid(&sia, 2, SECURITY_BUILTIN_DOMAIN_RID,
+			DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &sid);
+	if (success && sid) {
+		CheckTokenMembership(nullptr, sid, &elevated);
+		FreeSid(sid);
+	}
+
+	return elevated;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int)
 {
 	INITCOMMONCONTROLSEX icce;
 
-	if (!IsAppRunningAsAdminMode()) {
+	if (!HasElevation()) {
 		HANDLE hLowMutex = CreateMutexW(nullptr, true,
 				L"OBSUpdaterRunningAsNonAdminUser");
 

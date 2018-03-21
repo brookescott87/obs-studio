@@ -1,6 +1,8 @@
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QGridLayout>
 #include <QScrollArea>
+#include <QPushButton>
 #include <QLabel>
 #include "window-basic-adv-audio.hpp"
 #include "window-basic-main.hpp"
@@ -40,7 +42,7 @@ OBSBasicAdvAudio::OBSBasicAdvAudio(QWidget *parent)
 	label = new QLabel(QTStr("Basic.AdvAudio.SyncOffset"));
 	label->setAlignment(Qt::AlignHCenter);
 	mainLayout->addWidget(label, 0, idx++);
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || HAVE_PULSEAUDIO
 	label = new QLabel(QTStr("Basic.AdvAudio.Monitoring"));
 	label->setAlignment(Qt::AlignHCenter);
 	mainLayout->addWidget(label, 0, idx++);
@@ -65,10 +67,19 @@ OBSBasicAdvAudio::OBSBasicAdvAudio(QWidget *parent)
 	scrollArea->setWidget(widget);
 	scrollArea->setWidgetResizable(true);
 
+	QPushButton *closeButton = new QPushButton(QTStr("Close"));
+
+	QHBoxLayout *buttonLayout = new QHBoxLayout;
+	buttonLayout->addStretch();
+	buttonLayout->addWidget(closeButton);
+
 	vlayout = new QVBoxLayout;
 	vlayout->setContentsMargins(11, 11, 11, 11);
 	vlayout->addWidget(scrollArea);
+	vlayout->addLayout(buttonLayout);
 	setLayout(vlayout);
+
+	connect(closeButton, &QPushButton::clicked, [this] () {close();});
 
 	installEventFilter(CreateShortcutFilter());
 

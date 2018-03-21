@@ -561,6 +561,8 @@ struct gs_duplicator : gs_obj {
 	ComPtr<IDXGIOutputDuplication> duplicator;
 	gs_texture_2d *texture;
 	int idx;
+	long refs;
+	bool updated;
 
 	void Start();
 
@@ -789,6 +791,9 @@ struct gs_device {
 	gs_pixel_shader             *curPixelShader = nullptr;
 	gs_swap_chain               *curSwapChain = nullptr;
 
+	gs_vertex_buffer            *lastVertexBuffer = nullptr;
+	gs_vertex_shader            *lastVertexShader = nullptr;
+
 	bool                        zstencilStateChanged = true;
 	bool                        rasterStateChanged = true;
 	bool                        blendStateChanged = true;
@@ -828,6 +833,8 @@ struct gs_device {
 	void UpdateZStencilState();
 	void UpdateRasterState();
 	void UpdateBlendState();
+
+	void LoadVertexBufferData();
 
 	inline void CopyTex(ID3D11Texture2D *dst,
 			uint32_t dst_x, uint32_t dst_y,

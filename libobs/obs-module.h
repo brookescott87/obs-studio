@@ -90,12 +90,15 @@ bool obs_module_load(void)
  * may need loading.
  *
  * @return           Return true to continue loading the module, otherwise
- *                   false to indcate failure and unload the module
+ *                   false to indicate failure and unload the module
  */
 MODULE_EXPORT bool obs_module_load(void);
 
 /** Optional: Called when the module is unloaded.  */
 MODULE_EXPORT void obs_module_unload(void);
+
+/** Optional: Called when all modules have finished loading */
+MODULE_EXPORT void obs_module_post_load(void);
 
 /** Called to set the current locale data for the module.  */
 MODULE_EXPORT void obs_module_set_locale(const char *locale);

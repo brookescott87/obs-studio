@@ -116,6 +116,8 @@ public:
 	const char *GetLastLog() const;
 	const char *GetCurrentLog() const;
 
+	const char *GetLastCrashLog() const;
+
 	std::string GetVersionString() const;
 	bool IsPortableMode();
 
@@ -176,9 +178,12 @@ static inline int GetProfilePath(char *path, size_t size, const char *file)
 	return window->GetProfilePath(path, size, file);
 }
 
+extern bool portable_mode;
 extern bool opt_start_streaming;
 extern bool opt_start_recording;
 extern bool opt_start_replaybuffer;
 extern bool opt_minimize_tray;
 extern bool opt_studio_mode;
+extern bool opt_allow_opengl;
+extern bool opt_always_on_top;
 extern std::string opt_starting_scene;
