@@ -54,7 +54,7 @@ goto done
 :common1
 mkdir build64
 cd build64
-cmake -DCMAKE_INSTALL_PREFIX:PATH="%OBS_INSTALL_PREFIX%" -G %cmgen% ..
+cmake -DCMAKE_INSTALL_PREFIX:PATH="%OBS_INSTALL_PREFIX%" -DQTDIR="%QTDIR%" -DDepsPath="%DepsPath%" -G %cmgen% ..
 cd ..
 goto done
 
