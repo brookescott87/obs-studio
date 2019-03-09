@@ -8,6 +8,12 @@
 
 using namespace std;
 
+extern bool EncoderAvailable(const char *encoder);
+
+volatile bool streaming_active = false;
+volatile bool recording_active = false;
+volatile bool replaybuf_active = false;
+
 static void OBSStreamStarting(void *data, calldata_t *params)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler*>(data);
@@ -39,6 +45,7 @@ static void OBSStartStreaming(void *data, calldata_t *params)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler*>(data);
 	output->streamingActive = true;
+	os_atomic_set_bool(&streaming_active, true);
 	QMetaObject::invokeMethod(output->main, "StreamingStart");
 
 	UNUSED_PARAMETER(params);
@@ -54,6 +61,7 @@ static void OBSStopStreaming(void *data, calldata_t *params)
 
 	output->streamingActive = false;
 	output->delayActive = false;
+	os_atomic_set_bool(&streaming_active, false);
 	QMetaObject::invokeMethod(output->main,
 			"StreamingStop", Q_ARG(int, code), Q_ARG(QString, arg_last_error));
 }
@@ -63,6 +71,7 @@ static void OBSStartRecording(void *data, calldata_t *params)
 	BasicOutputHandler *output = static_cast<BasicOutputHandler*>(data);
 
 	output->recordingActive = true;
+	os_atomic_set_bool(&recording_active, true);
 	QMetaObject::invokeMethod(output->main, "RecordingStart");
 
 	UNUSED_PARAMETER(params);
@@ -74,6 +83,7 @@ static void OBSStopRecording(void *data, calldata_t *params)
 	int code = (int)calldata_int(params, "code");
 
 	output->recordingActive = false;
+	os_atomic_set_bool(&recording_active, false);
 	QMetaObject::invokeMethod(output->main,
 			"RecordingStop", Q_ARG(int, code));
 
@@ -93,6 +103,7 @@ static void OBSStartReplayBuffer(void *data, calldata_t *params)
 	BasicOutputHandler *output = static_cast<BasicOutputHandler*>(data);
 
 	output->replayBufferActive = true;
+	os_atomic_set_bool(&replaybuf_active, true);
 	QMetaObject::invokeMethod(output->main, "ReplayBufferStart");
 
 	UNUSED_PARAMETER(params);
@@ -104,6 +115,7 @@ static void OBSStopReplayBuffer(void *data, calldata_t *params)
 	int code = (int)calldata_int(params, "code");
 
 	output->replayBufferActive = false;
+	os_atomic_set_bool(&replaybuf_active, false);
 	QMetaObject::invokeMethod(output->main,
 			"ReplayBufferStop", Q_ARG(int, code));
 
@@ -242,6 +254,8 @@ void SimpleOutput::LoadRecordingPreset_Lossless()
 	obs_data_set_string(settings, "video_encoder", "utvideo");
 	obs_data_set_string(settings, "audio_encoder", "pcm_s16le");
 
+	int aMixes = 1;
+	obs_output_set_mixers(fileOutput, aMixes);
 	obs_output_update(fileOutput, settings);
 	obs_data_release(settings);
 }
@@ -300,7 +314,10 @@ void SimpleOutput::LoadRecordingPreset()
 		} else if (strcmp(encoder, SIMPLE_ENCODER_AMD) == 0) {
 			LoadRecordingPreset_h264("amd_amf_h264");
 		} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC) == 0) {
-			LoadRecordingPreset_h264("ffmpeg_nvenc");
+			const char *id = EncoderAvailable("jim_nvenc")
+				? "jim_nvenc"
+				: "ffmpeg_nvenc";
+			LoadRecordingPreset_h264(id);
 		}
 		usingRecordingPreset = true;
 
@@ -315,14 +332,22 @@ SimpleOutput::SimpleOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 {
 	const char *encoder = config_get_string(main->Config(), "SimpleOutput",
 			"StreamEncoder");
-	if (strcmp(encoder, SIMPLE_ENCODER_QSV) == 0)
+
+	if (strcmp(encoder, SIMPLE_ENCODER_QSV) == 0) {
 		LoadStreamingPreset_h264("obs_qsv11");
-	else if (strcmp(encoder, SIMPLE_ENCODER_AMD) == 0)
+
+	} else if (strcmp(encoder, SIMPLE_ENCODER_AMD) == 0) {
 		LoadStreamingPreset_h264("amd_amf_h264");
-	else if (strcmp(encoder, SIMPLE_ENCODER_NVENC) == 0)
-		LoadStreamingPreset_h264("ffmpeg_nvenc");
-	else
+
+	} else if (strcmp(encoder, SIMPLE_ENCODER_NVENC) == 0) {
+		const char *id = EncoderAvailable("jim_nvenc")
+			? "jim_nvenc"
+			: "ffmpeg_nvenc";
+		LoadStreamingPreset_h264(id);
+
+	} else {
 		LoadStreamingPreset_h264("obs_x264");
+	}
 
 	if (!CreateAACEncoder(aacStreaming, aacStreamEncID, GetAudioBitrate(),
 				"simple_aac", 0))
@@ -649,6 +674,10 @@ bool SimpleOutput::StartStreaming(obs_service_t *service)
 	if (!Active())
 		SetupOutputs();
 
+	Auth *auth = main->GetAuth();
+	if (auth)
+		auth->OnStreamConfig();
+
 	/* --------------------- */
 
 	const char *type = obs_service_get_output_type(service);
@@ -895,6 +924,7 @@ bool SimpleOutput::ConfigureRecording(bool updateReplayBuffer)
 		obs_data_set_string(settings, "directory", path);
 		obs_data_set_string(settings, "format", f.c_str());
 		obs_data_set_string(settings, "extension", format);
+		obs_data_set_bool(settings, "allow_spaces", !noSpace);
 		obs_data_set_int(settings, "max_time_sec", rbTime);
 		obs_data_set_int(settings, "max_size_mb",
 				usingRecordingPreset ? rbSize : 0);
@@ -1032,19 +1062,32 @@ struct AdvancedOutput : BasicOutputHandler {
 static OBSData GetDataFromJsonFile(const char *jsonFile)
 {
 	char fullPath[512];
+	obs_data_t *data = nullptr;
 
 	int ret = GetProfilePath(fullPath, sizeof(fullPath), jsonFile);
 	if (ret > 0) {
 		BPtr<char> jsonData = os_quick_read_utf8_file(fullPath);
 		if (!!jsonData) {
-			obs_data_t *data = obs_data_create_from_json(jsonData);
-			OBSData dataRet(data);
-			obs_data_release(data);
-			return dataRet;
+			data = obs_data_create_from_json(jsonData);
 		}
 	}
 
-	return nullptr;
+	if (!data)
+		data = obs_data_create();
+	OBSData dataRet(data);
+	obs_data_release(data);
+	return dataRet;
+}
+
+static void ApplyEncoderDefaults(OBSData &settings,
+		const obs_encoder_t *encoder)
+{
+	OBSData dataRet = obs_encoder_get_defaults(encoder);
+	obs_data_release(dataRet);
+
+	if (!!settings)
+		obs_data_apply(dataRet, settings);
+	settings = std::move(dataRet);
 }
 
 AdvancedOutput::AdvancedOutput(OBSBasic *main_) : BasicOutputHandler(main_)
@@ -1157,6 +1200,7 @@ void AdvancedOutput::UpdateStreamSettings()
 			"ApplyServiceSettings");
 
 	OBSData settings = GetDataFromJsonFile("streamEncoder.json");
+	ApplyEncoderDefaults(settings, h264Streaming);
 
 	if (applyServiceSettings)
 		obs_service_apply_encoder_settings(main->GetService(),
@@ -1192,8 +1236,13 @@ inline void AdvancedOutput::SetupStreaming()
 			"Rescale");
 	const char *rescaleRes = config_get_string(main->Config(), "AdvOut",
 			"RescaleRes");
+	uint32_t caps = obs_encoder_get_caps(h264Streaming);
 	unsigned int cx = 0;
 	unsigned int cy = 0;
+
+	if ((caps & OBS_ENCODER_CAP_PASS_TEXTURE) != 0) {
+		rescale = false;
+	}
 
 	if (rescale && rescaleRes && *rescaleRes) {
 		if (sscanf(rescaleRes, "%ux%u", &cx, &cy) != 2) {
@@ -1228,6 +1277,11 @@ inline void AdvancedOutput::SetupRecording()
 			obs_output_set_video_encoder(replayBuffer,
 					h264Streaming);
 	} else {
+		uint32_t caps = obs_encoder_get_caps(h264Recording);
+		if ((caps & OBS_ENCODER_CAP_PASS_TEXTURE) != 0) {
+			rescale = false;
+		}
+
 		if (rescale && rescaleRes && *rescaleRes) {
 			if (sscanf(rescaleRes, "%ux%u", &cx, &cy) != 2) {
 				cx = 0;
@@ -1287,8 +1341,8 @@ inline void AdvancedOutput::SetupFFmpeg()
 			"FFVCustom");
 	int aBitrate = config_get_int(main->Config(), "AdvOut",
 			"FFABitrate");
-	int aTrack = config_get_int(main->Config(), "AdvOut",
-			"FFAudioTrack");
+	int aMixes = config_get_int(main->Config(), "AdvOut",
+			"FFAudioMixes");
 	const char *aEncoder = config_get_string(main->Config(), "AdvOut",
 			"FFAEncoder");
 	int aEncoderId = config_get_int(main->Config(), "AdvOut",
@@ -1322,7 +1376,7 @@ inline void AdvancedOutput::SetupFFmpeg()
 		}
 	}
 
-	obs_output_set_mixer(fileOutput, aTrack - 1);
+	obs_output_set_mixers(fileOutput, aMixes);
 	obs_output_set_media(fileOutput, obs_get_video(), obs_get_audio());
 	obs_output_update(fileOutput, settings);
 
@@ -1408,6 +1462,10 @@ bool AdvancedOutput::StartStreaming(obs_service_t *service)
 
 	if (!Active())
 		SetupOutputs();
+
+	Auth *auth = main->GetAuth();
+	if (auth)
+		auth->OnStreamConfig();
 
 	/* --------------------- */
 
@@ -1717,6 +1775,7 @@ bool AdvancedOutput::StartReplayBuffer()
 		obs_data_set_string(settings, "directory", path);
 		obs_data_set_string(settings, "format", f.c_str());
 		obs_data_set_string(settings, "extension", recFormat);
+		obs_data_set_bool(settings, "allow_spaces", !noSpace);
 		obs_data_set_int(settings, "max_time_sec", rbTime);
 		obs_data_set_int(settings, "max_size_mb",
 				usesBitrate ? 0 : rbSize);
